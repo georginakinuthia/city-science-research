@@ -1,5 +1,5 @@
 import type { FeatureCollection, Geometry } from 'geojson'
-import { describe, expect,it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   buildNodesFromCollection,
