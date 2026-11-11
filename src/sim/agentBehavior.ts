@@ -18,9 +18,18 @@
  */
 
 import {
-  DEFAULTS, ENGAGEMENT, FOLLOWING, GEOMETRY, MOMENTUM,
-  ORCA as ORCA_CONFIG, PROXIMITY_ZONES, ROUTE_CHOICE,
-  SPEED, SURFACE, TIMING, WEIDMANN,
+  DEFAULTS,
+  ENGAGEMENT,
+  FOLLOWING,
+  GEOMETRY,
+  MOMENTUM,
+  ORCA as ORCA_CONFIG,
+  PROXIMITY_ZONES,
+  ROUTE_CHOICE,
+  SPEED,
+  SURFACE,
+  TIMING,
+  WEIDMANN,
 } from '../config'
 import { type OrcaAgent, type OrcaParams, solveORCA } from '../models/orca'
 
@@ -194,7 +203,12 @@ const _headingState: HeadingState = { heading: 0, speed: 0, shopMinutes: 0, wait
 // Density / perception helpers
 // ─────────────────────────────────────────────────────────────
 
-function getLocalDensityAt(sim: Simulation, patchX: number, patchY: number, radius: number): number {
+function getLocalDensityAt(
+  sim: Simulation,
+  patchX: number,
+  patchY: number,
+  radius: number,
+): number {
   const density = sim.density
   const width = sim.width
   const height = sim.height
@@ -389,11 +403,8 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     candAreal[candCount] = areal
     candObstacle[candCount] = obstacle
     candShade[candCount] = shade
-    candJitterHash[candCount] = fnv1aHash3(
-      agentId,
-      Math.round(nx * 1000) >>> 0,
-      Math.round(ny * 1000) >>> 0,
-    ) | 0
+    candJitterHash[candCount] =
+      fnv1aHash3(agentId, Math.round(nx * 1000) >>> 0, Math.round(ny * 1000) >>> 0) | 0
     candCount++
   }
 
@@ -415,13 +426,14 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
       const biasDot = candNdx[k]! * biasDx + candNdy[k]! * biasDy
       const jitter = ((candJitterHash[k]! >>> 0) & 0xffff) / 0xffff
 
-      const V = beta.distance * vDist
-              + beta.alignment * candAlignment[k]! * straightness
-              + effectiveDensityBeta * vDensity
-              + beta.obstacle * candObstacle[k]!
-              + beta.shade * candShade[k]!
-              + biasWeight * biasDot
-              + jitter * jitterScale
+      const V =
+        beta.distance * vDist +
+        beta.alignment * candAlignment[k]! * straightness +
+        effectiveDensityBeta * vDensity +
+        beta.obstacle * candObstacle[k]! +
+        beta.shade * candShade[k]! +
+        biasWeight * biasDot +
+        jitter * jitterScale
 
       candUtilities[k] = V
       if (V > maxU) maxU = V
@@ -546,12 +558,20 @@ interface AmenityOut {
   minutesSpent: number
 }
 const _furnitureOut: AmenityOut = {
-  hasGradient: false, gradientDx: 0, gradientDy: 0,
-  weight: 0, speedFactor: 1, minutesSpent: 0,
+  hasGradient: false,
+  gradientDx: 0,
+  gradientDy: 0,
+  weight: 0,
+  speedFactor: 1,
+  minutesSpent: 0,
 }
 const _stallsOut: AmenityOut = {
-  hasGradient: false, gradientDx: 0, gradientDy: 0,
-  weight: 0, speedFactor: 1, minutesSpent: 0,
+  hasGradient: false,
+  gradientDx: 0,
+  gradientDy: 0,
+  weight: 0,
+  speedFactor: 1,
+  minutesSpent: 0,
 }
 
 function handleAmenity(
@@ -642,11 +662,17 @@ function handleAmenity(
   }
 }
 
-function applyAmenityInfluences(sim: Simulation, i: number, state: HeadingState, stepDt: number): void {
+function applyAmenityInfluences(
+  sim: Simulation,
+  i: number,
+  state: HeadingState,
+  stepDt: number,
+): void {
   if (sim.pedNoEngagement[i] === 1) return
 
   handleAmenity(
-    sim, i,
+    sim,
+    i,
     sim.furniturePotential,
     ENGAGEMENT_WAITING,
     false,
@@ -656,14 +682,20 @@ function applyAmenityInfluences(sim: Simulation, i: number, state: HeadingState,
     _furnitureOut,
   )
   if (_furnitureOut.hasGradient) {
-    state.heading = blendHeadingWithVector(state.heading, _furnitureOut.gradientDx, _furnitureOut.gradientDy, _furnitureOut.weight)
+    state.heading = blendHeadingWithVector(
+      state.heading,
+      _furnitureOut.gradientDx,
+      _furnitureOut.gradientDy,
+      _furnitureOut.weight,
+    )
     state.speed = _furnitureOut.speedFactor * sim.pedSpeed[i]!
   }
   state.waitMinutes += _furnitureOut.minutesSpent
   const hasFurniturePull = _furnitureOut.hasGradient
 
   handleAmenity(
-    sim, i,
+    sim,
+    i,
     sim.stallPotential,
     ENGAGEMENT_SHOPPING,
     true,
@@ -673,7 +705,12 @@ function applyAmenityInfluences(sim: Simulation, i: number, state: HeadingState,
     _stallsOut,
   )
   if (!hasFurniturePull && _stallsOut.hasGradient) {
-    state.heading = blendHeadingWithVector(state.heading, _stallsOut.gradientDx, _stallsOut.gradientDy, _stallsOut.weight)
+    state.heading = blendHeadingWithVector(
+      state.heading,
+      _stallsOut.gradientDx,
+      _stallsOut.gradientDy,
+      _stallsOut.weight,
+    )
     state.speed = _stallsOut.speedFactor * sim.pedSpeed[i]!
   }
   state.shopMinutes += _stallsOut.minutesSpent
@@ -717,11 +754,17 @@ function applyFollowing(sim: Simulation, i: number, state: HeadingState): void {
   const headRad = compassDegToRad(state.heading)
   const fwdX = Math.cos(headRad)
   const fwdY = -Math.sin(headRad)
-  const coneThreshold = Math.cos(FOLLOWING.coneHalfAngleDeg * Math.PI / 180)
+  const coneThreshold = Math.cos((FOLLOWING.coneHalfAngleDeg * Math.PI) / 180)
 
   const tx = sim.pedX[i]!
   const ty = sim.pedY[i]!
-  const neighbors = hash.queryNearest(tx, ty, FOLLOWING.radius, sim.pedId[i]!, ORCA_CONFIG.maxNeighbors)
+  const neighbors = hash.queryNearest(
+    tx,
+    ty,
+    FOLLOWING.radius,
+    sim.pedId[i]!,
+    ORCA_CONFIG.maxNeighbors,
+  )
 
   let oncomingCount = 0
   let bestDist = Infinity
@@ -753,8 +796,7 @@ function applyFollowing(sim: Simulation, i: number, state: HeadingState): void {
   }
 
   const crowdFrac = clamp01(
-    (oncomingCount - FOLLOWING.crowdingOnset) /
-    (FOLLOWING.crowdingFull - FOLLOWING.crowdingOnset),
+    (oncomingCount - FOLLOWING.crowdingOnset) / (FOLLOWING.crowdingFull - FOLLOWING.crowdingOnset),
   )
 
   if (crowdFrac > EPSILON) {
@@ -780,7 +822,13 @@ function wouldLeaveWalkable(sim: Simulation, i: number, headingDeg: number, dist
 }
 
 const _selfOrca: OrcaAgent = {
-  id: -1, x: 0, y: 0, vx: 0, vy: 0, radius: 0, maxSpeed: 0,
+  id: -1,
+  x: 0,
+  y: 0,
+  vx: 0,
+  vy: 0,
+  radius: 0,
+  maxSpeed: 0,
 }
 const _orcaParams: OrcaParams = {
   timeHorizon: ORCA_CONFIG.timeHorizonWalking,
@@ -804,7 +852,9 @@ function evaluateCollisions(
   const isEngaged = sim.pedEngagementMode[i] !== ENGAGEMENT_OFF
   const agentRadius = minSpacing * ORCA_CONFIG.radiusMultiplier
 
-  _orcaParams.timeHorizon = isEngaged ? ORCA_CONFIG.timeHorizonEngaged : ORCA_CONFIG.timeHorizonWalking
+  _orcaParams.timeHorizon = isEngaged
+    ? ORCA_CONFIG.timeHorizonEngaged
+    : ORCA_CONFIG.timeHorizonWalking
   _orcaParams.agentRadius = agentRadius
   _orcaParams.maxNeighbors = ORCA_CONFIG.maxNeighbors
   _orcaParams.neighborDist = ORCA_CONFIG.neighborDist
@@ -836,7 +886,12 @@ function evaluateCollisions(
   return true
 }
 
-function recordZoneViolations(sim: Simulation, i: number, minSpacing: number, neighbors: OrcaAgent[]): void {
+function recordZoneViolations(
+  sim: Simulation,
+  i: number,
+  minSpacing: number,
+  neighbors: OrcaAgent[],
+): void {
   const intimateDist = minSpacing * PROXIMITY_ZONES.intimate
   const personalDist = minSpacing * PROXIMITY_ZONES.personal
   const socialDist = minSpacing * PROXIMITY_ZONES.social
@@ -891,7 +946,7 @@ function applyAvoidance(sim: Simulation, i: number, state: HeadingState, stepDt:
     return
   }
 
-  const deflectionFactor = Math.max(0.2, 1 - (deflection / 90))
+  const deflectionFactor = Math.max(0.2, 1 - deflection / 90)
   const cappedSpeed = Math.min(newSpeed, baseSpeed) * deflectionFactor
 
   if (sim.pedEngagementMode[i] === ENGAGEMENT_OFF) {
@@ -910,7 +965,12 @@ function applySurfacePreferences(sim: Simulation, i: number, state: HeadingState
   if (currentSurfacePotential < 0) {
     const surfaceGradient = seekGradient(sim, i, sim.surfacePotential, true)
     if (surfaceGradient !== null) {
-      state.heading = blendHeadingWithVector(state.heading, surfaceGradient[0], surfaceGradient[1], 1.0)
+      state.heading = blendHeadingWithVector(
+        state.heading,
+        surfaceGradient[0],
+        surfaceGradient[1],
+        1.0,
+      )
     }
   }
 }
@@ -924,12 +984,7 @@ function computeSpeedFactor(sim: Simulation, i: number): number {
   return clamp01(weidmannSpeedFactor(density))
 }
 
-function calculateHeading(
-  sim: Simulation,
-  i: number,
-  targetDist: number,
-  stepDt: number,
-): void {
+function calculateHeading(sim: Simulation, i: number, targetDist: number, stepDt: number): void {
   const state = _headingState
   const cellIdx = sim.pedCellIdx[i]!
   if (cellIdx < 0) {
@@ -1005,7 +1060,9 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
   const safeHeading = Number.isFinite(headingRaw) ? headingRaw : fallbackHeading
   const fallbackSpeed = Number.isFinite(sim.pedCurrentSpeed[i]!)
     ? sim.pedCurrentSpeed[i]!
-    : Number.isFinite(sim.pedSpeed[i]!) ? sim.pedSpeed[i]! : 0
+    : Number.isFinite(sim.pedSpeed[i]!)
+      ? sim.pedSpeed[i]!
+      : 0
   const safeSpeed = Number.isFinite(speedMs) ? speedMs : fallbackSpeed
 
   sim.setAgentHeading(i, safeHeading)
@@ -1019,7 +1076,8 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
 
     const landedIdx = sim.pedCellIdx[i]!
     const landedPotential = landedIdx >= 0 ? (sim.surfacePotential[landedIdx] ?? 0) : -1
-    const pathBlocked = landedPotential < 0 || !isPathClear(sim, prevX, prevY, sim.pedX[i]!, sim.pedY[i]!)
+    const pathBlocked =
+      landedPotential < 0 || !isPathClear(sim, prevX, prevY, sim.pedX[i]!, sim.pedY[i]!)
     if (pathBlocked) {
       sim.setAgentPosition(i, prevX, prevY)
     } else {
@@ -1076,9 +1134,35 @@ export function initialiseAgent(
 
   const agentId = sim.pedId[i]!
 
-  const speedSpread = _p.speedBase * (SPEED.spreadBase + dispersion * SPEED.spreadDiversityScale)
+  // ── 3 Defined Pedestrian Profiles (Buen Camino Benchmark) ──────────
+  // Deterministic roll per agent ID: 60% Commuters, 25% Caregivers, 15% Reduced Mobility
+  const profileRoll = agentRandom(agentId, 99)
+  let profileBaseSpeed = 1.2 // default m/s (FHWA P01 baseline)
+  let defaultShopProb = 0.05
+  let defaultWaitProb = 0.05
+
+  if (profileRoll < 0.6) {
+    // Profile 1: Commuters / Direct Transit (60%)
+    profileBaseSpeed = 1.2
+    defaultShopProb = 0.02
+    defaultWaitProb = 0.02
+  } else if (profileRoll < 0.85) {
+    // Profile 2: Caregivers & Families / Women with Children (25%)
+    profileBaseSpeed = 1.0
+    defaultShopProb = 0.35 // higher pull toward vendor stalls & shade
+    defaultWaitProb = 0.2
+  } else {
+    // Profile 3: Reduced Mobility & Older Adults (15%) (FHWA P03/P04 baseline)
+    profileBaseSpeed = 0.8
+    defaultShopProb = 0.05
+    defaultWaitProb = 0.15
+  }
+
+  // Apply individual speed variation based on profile baseline
+  const speedSpread =
+    profileBaseSpeed * (SPEED.spreadBase + dispersion * SPEED.spreadDiversityScale)
   const speedOffset = agentSignedRandom(agentId, 7) * speedSpread
-  sim.pedSpeed[i] = Math.max(SPEED.minAgentSpeed, _p.speedBase + speedOffset)
+  sim.pedSpeed[i] = Math.max(SPEED.minAgentSpeed, profileBaseSpeed + speedOffset)
 
   let heading = getTargetHeading(sim, i)
   heading = normalizeDeg(heading)
@@ -1089,7 +1173,10 @@ export function initialiseAgent(
   const momentumOffset = agentSignedRandom(agentId, 11) * momentumSpread
   const straightnessOffset = agentSignedRandom(agentId, 17) * straightnessSpread
 
-  sim.pedMomentumPreference[i] = Math.min(clamp01(baseMomentum + momentumOffset), MOMENTUM.maxPreference)
+  sim.pedMomentumPreference[i] = Math.min(
+    clamp01(baseMomentum + momentumOffset),
+    MOMENTUM.maxPreference,
+  )
   sim.pedRouteStraightness[i] = clamp01(baseStraightness + straightnessOffset)
 
   const biasAngle = agentRandom(agentId, 23) * TAU
@@ -1098,8 +1185,9 @@ export function initialiseAgent(
   sim.pedRouteBiasDy[i] = Math.sin(biasAngle)
   sim.pedRouteBiasWeight[i] = biasStrength
 
-  sim.pedShopProb[i] = Number.isFinite(shopProb) ? shopProb : Math.random()
-  sim.pedWaitProb[i] = Number.isFinite(waitProb) ? waitProb : Math.random()
+  // Set engagement probabilities per profile
+  sim.pedShopProb[i] = Number.isFinite(shopProb) ? shopProb : defaultShopProb
+  sim.pedWaitProb[i] = Number.isFinite(waitProb) ? waitProb : defaultWaitProb
   sim.pedNoEngagement[i] = startNode.noEngagement === true ? 1 : 0
   sim.pedEngagementMode[i] = ENGAGEMENT_OFF
   sim.pedEngagementDuration[i] = 0
@@ -1120,7 +1208,10 @@ export function recomputeAgentParams(sim: Simulation, i: number): void {
   const baseMomentum = Math.min(clamp01(MOMENTUM.base), MOMENTUM.maxPreference)
   const momentumSpread = dispersion * MOMENTUM.spreadScale
   const momentumOffset = agentSignedRandom(agentId, 11) * momentumSpread
-  sim.pedMomentumPreference[i] = Math.min(clamp01(baseMomentum + momentumOffset), MOMENTUM.maxPreference)
+  sim.pedMomentumPreference[i] = Math.min(
+    clamp01(baseMomentum + momentumOffset),
+    MOMENTUM.maxPreference,
+  )
 
   const baseStraightness = clamp01(ROUTE_CHOICE.straightness)
   const straightnessSpread = dispersion * SPEED.straightnessSpread
