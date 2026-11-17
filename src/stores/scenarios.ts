@@ -18,18 +18,20 @@ export { buildNodesFromCollection, computeNodeDistanceField, computeShortestPath
 export { ScenarioContainer }
 export type { GridLike, NodeState, ScenarioData }
 
-// Module-level helper: fetch and parse GeoJSON
+// Empirically calibrated peak-hour flow for Tacubaya (2,190 peds/15 min at Jalisco/Dublán = 8,760 pph)
+const TACUBAYA_PEAK_PPH = 8760
+
 export async function fetchGeoJSON(filename: string): Promise<FeatureCollection<Geometry>> {
-  const url = new URL(filename, import.meta.url)
+  const cleanPath = filename.replace(/^\//, '')
+  const url = new URL(cleanPath, window.location.href)
   const response = await fetch(url)
 
   if (!response.ok) {
     throw new Error(`Failed to fetch ${filename}: ${response.status} ${response.statusText}`)
   }
 
-  const data = JSON.parse(await response.text()) as FeatureCollection<Geometry>
+  const data = (await response.json()) as FeatureCollection<Geometry>
 
-  // Basic validation
   if (!data || data.type !== 'FeatureCollection' || !Array.isArray(data.features)) {
     throw new Error(`Invalid GeoJSON format in ${filename}`)
   }
@@ -37,10 +39,9 @@ export async function fetchGeoJSON(filename: string): Promise<FeatureCollection<
   return data
 }
 
-// helper: buffer point features by their `dia` property (meters)
-function bufferPointsByDia(fc: FeatureCollection<Geometry> | null) {
+function bufferPointsByDia(fc: FeatureCollection<Geometry> | null): FeatureCollection<Geometry> {
   if (!fc || !Array.isArray(fc.features)) {
-    return { type: 'FeatureCollection' as const, features: [] }
+    return { type: 'FeatureCollection', features: [] }
   }
 
   const features = fc.features.map((f: any) => {
@@ -55,7 +56,7 @@ function bufferPointsByDia(fc: FeatureCollection<Geometry> | null) {
           buf.properties = { ...props, dia }
         }
         return buf || { ...f, properties: { ...props, dia } }
-      } catch (e) {
+      } catch {
         return { ...f, properties: { ...props, dia } }
       }
     }
@@ -63,17 +64,15 @@ function bufferPointsByDia(fc: FeatureCollection<Geometry> | null) {
     return { ...f, properties: { ...props, dia } }
   })
 
-  return { type: 'FeatureCollection' as const, features }
+  return { type: 'FeatureCollection', features }
 }
 
-// Module-level loader that returns a ScenarioData object for Tacubaya
 export async function loadScenario(scenarioPath: string): Promise<ScenarioData> {
   const [furniture, stalls, structures, surfaces, shade] = await Promise.all([
     fetchGeoJSON(`/${scenarioPath}/furniture.geojson`),
     fetchGeoJSON(`/${scenarioPath}/stalls.geojson`),
     fetchGeoJSON(`/${scenarioPath}/structures.geojson`),
     fetchGeoJSON(`/${scenarioPath}/surfaces.geojson`),
-    // Tacubaya exports use shade.geojson, with fallback to trees.geojson
     fetchGeoJSON(`/${scenarioPath}/shade.geojson`).catch(() =>
       fetchGeoJSON(`/${scenarioPath}/trees.geojson`),
     ),
@@ -89,7 +88,6 @@ export async function loadScenario(scenarioPath: string): Promise<ScenarioData> 
 }
 
 export const useScenariosStore = defineStore('scenarios', () => {
-  // State: two ScenarioContainer instances
   const scenarioA = ref<ScenarioContainer | null>(null)
   const scenarioB = ref<ScenarioContainer | null>(null)
   const sharedNodes = ref<NodeState[]>([])
@@ -104,7 +102,6 @@ export const useScenariosStore = defineStore('scenarios', () => {
     if (isLoading.value) return
     isLoading.value = true
     try {
-      // Prioritize Tacubaya transit nodes from scenarioA, fallback to /nodes.geojson
       let sharedNodesGeoJSON: FeatureCollection<Geometry>
       try {
         sharedNodesGeoJSON = await fetchGeoJSON('/scenarioA/metro_stations.geojson')
@@ -112,27 +109,33 @@ export const useScenariosStore = defineStore('scenarios', () => {
         sharedNodesGeoJSON = await fetchGeoJSON('/nodes.geojson')
       }
 
-      // 🚨 CRITICAL FIX: Inject the rigid properties the UI expects.
-      if (sharedNodesGeoJSON && Array.isArray(sharedNodesGeoJSON.features)) {
-        sharedNodesGeoJSON.features.forEach((f, index) => {
-          if (!f.properties) f.properties = {}
-          f.properties.fid = f.properties.fid || `station-${index}`
-          f.properties.name = f.properties.name || `Tacubaya Node ${index + 1}`
-          f.properties.pph = f.properties.pph ?? 500
-          f.properties.interval = f.properties.interval ?? 0
-        })
-      }
+      // Filter strictly to Tacubaya study-area coordinates so all 8,760 pph spawns locally
+      sharedNodesGeoJSON.features = sharedNodesGeoJSON.features.filter((f: any) => {
+        if (f.geometry?.type !== 'Point') return false
+        const [lon, lat] = f.geometry.coordinates
+        return lon >= -99.198 && lon <= -99.176 && lat >= 19.392 && lat <= 19.414
+      })
+
+      const nodeCount = Math.max(1, sharedNodesGeoJSON.features.length)
+      const perNodePph = Math.round(TACUBAYA_PEAK_PPH / nodeCount)
+
+      sharedNodesGeoJSON.features.forEach((f: any, index: number) => {
+        if (!f.properties) f.properties = {}
+        f.properties.fid = f.properties.fid || `station-${index}`
+        f.properties.name = f.properties.name || `Tacubaya Node ${index + 1}`
+        const currentPph = Number(f.properties.pph)
+        f.properties.pph = Number.isFinite(currentPph) && currentPph > 500 ? currentPph : perNodePph
+        f.properties.interval = f.properties.interval ?? 0
+      })
 
       sharedNodes.value = buildNodesFromCollection(sharedNodesGeoJSON)
       nodesBuffered.value = bufferPointsByDia(sharedNodesGeoJSON)
 
-      // Load Tacubaya scenarios A & B
       const [dataA, dataB] = await Promise.all([
         loadScenario('scenarioA'),
         loadScenario('scenarioB'),
       ])
 
-      // markRaw: keeps Vue from deeply wrapping the FeatureCollection
       scenarioA.value = markRaw(new ScenarioContainer(dataA, 'scenarioA'))
       scenarioB.value = markRaw(new ScenarioContainer(dataB, 'scenarioB'))
     } catch (err) {

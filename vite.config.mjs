@@ -7,7 +7,7 @@ import svgLoader from 'vite-svg-loader'
 // https://vitejs.dev/config/
 export default defineConfig(({ command }) => {
   return {
-    base: '/',
+    base: command === 'build' ? '/city-science-research/' : '/',
     plugins: [
       vue(),
       tailwindcss(),
