@@ -43,8 +43,8 @@ import type {
 export type SnapshotCallback = (simIdx: number, view: SimView) => void
 export type StatsCallback = (msg: StatsUpdateMessage) => void
 
-/** How long `init()` waits for INIT_DONE before rejecting. */
-const INIT_TIMEOUT_MS = 10_000
+/** Allow time to rasterize both study areas and compute their starting routes. */
+const INIT_TIMEOUT_MS = 30_000
 
 export interface ClientInitOptions {
   mode: 'dual' | 'single'
@@ -93,15 +93,11 @@ export class SimWorkerClient {
       this.handleMessage(e.data)
     }
     this.worker.onerror = (err) => {
-      console.error('[sim worker] error:', err.message, err)
-      // If an error fires while `init()` is still pending (e.g. module
-      // resolution failure on boot), reject the init promise rather than
-      // leaving it dangling forever.
-      if (this.initRejecter) {
-        this.initRejecter(err)
-        this.initResolver = null
-        this.initRejecter = null
-      }
+      const error = err.error instanceof Error
+        ? err.error
+        : new Error(err.message || 'The simulation worker could not load.')
+      if (this.initRejecter) this.failInit(error)
+      else console.error('[sim worker] error:', error.message, error)
     }
   }
 
@@ -109,7 +105,7 @@ export class SimWorkerClient {
    * Ship INIT to the worker and wait for INIT_DONE.
    *
    * Rejects with a timeout error if INIT_DONE doesn't arrive within
-   * `INIT_TIMEOUT_MS` (default 10 s). This guards against the failure
+   * `INIT_TIMEOUT_MS`. This guards against the failure
    * mode where the worker loads, doesn't throw, but never responds —
    * e.g., an exception inside `handleInit` that's swallowed somewhere.
    * Without the timeout the init promise would hang forever.
@@ -132,9 +128,7 @@ export class SimWorkerClient {
     return new Promise<ClientInitResult>((resolve, reject) => {
       let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         timeoutId = null
-        this.initResolver = null
-        this.initRejecter = null
-        reject(
+        this.failInit(
           new Error(
             `SimWorkerClient.init timed out after ${INIT_TIMEOUT_MS}ms — ` +
             `worker did not respond with INIT_DONE. Check worker console for errors.`,
@@ -149,7 +143,11 @@ export class SimWorkerClient {
         if (timeoutId !== null) { clearTimeout(timeoutId); timeoutId = null }
         reject(reason)
       }
-      worker.postMessage(msg)
+      try {
+        worker.postMessage(msg)
+      } catch (error) {
+        this.failInit(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
@@ -202,6 +200,7 @@ export class SimWorkerClient {
 
   /** Terminate the worker and release resources. */
   dispose(): void {
+    if (this.initRejecter) this.failInit(new Error('Simulation worker was disposed.'))
     if (this.worker) {
       this.worker.terminate()
       this.worker = null
@@ -218,6 +217,12 @@ export class SimWorkerClient {
       case 'INIT_DONE':
         this.handleInitDone(msg)
         break
+      case 'INIT_ERROR': {
+        const error = new Error(msg.message)
+        if (msg.stack) error.stack = msg.stack
+        this.failInit(error)
+        break
+      }
       case 'SNAPSHOT':
         this.handleSnapshot(msg)
         break
@@ -227,14 +232,20 @@ export class SimWorkerClient {
     }
   }
 
+  private failInit(error: Error): void {
+    const reject = this.initRejecter
+    this.initResolver = null
+    this.initRejecter = null
+    reject?.(error)
+  }
+
   private handleInitDone(msg: InitDoneMessage): void {
-    this.views = msg.sims.map((s) => new SimView({
-      width: s.width,
-      height: s.height,
-      bbox: s.bbox,
-      cellColorBuffer: s.cellColorBuffer,
-      nodeIdTable: s.nodeIdTable,
-    }))
+    if (!this.initResolver) return
+    this.views = msg.sims.map((s) => {
+      const view = new SimView(s)
+      view.updateSnapshot(s.initialSnapshot)
+      return view
+    })
     if (this.initResolver) {
       this.initResolver({
         views: this.views,

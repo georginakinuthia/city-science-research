@@ -9,6 +9,8 @@
  * into reactive refs for the UI.
  */
 
+import type { RoutingData } from '../stores/geo'
+
 import type { BehaviorParams } from './agentBehavior'
 import type { SimSnapshot } from './SimSnapshot'
 
@@ -110,6 +112,7 @@ export interface SerializedScenario {
   shade: unknown
   stalls: unknown
   furniture: unknown
+  routing?: RoutingData
 }
 
 export interface SerializedNode {
@@ -238,6 +241,14 @@ export interface SimStaticState {
   cellColorBuffer: Uint32Array
   /** String table for agent.startNodeId highlight lookups. */
   nodeIdTable: string[]
+  /** Paused state to draw as soon as the scenario is initialized. */
+  initialSnapshot: SimSnapshot
+}
+
+export interface InitErrorMessage {
+  type: 'INIT_ERROR'
+  message: string
+  stack?: string
 }
 
 /**
@@ -278,6 +289,7 @@ export interface StatsUpdateMessage {
 
 export type WorkerResponse =
   | InitDoneMessage
+  | InitErrorMessage
   | SnapshotMessage
   | StatsUpdateMessage
 

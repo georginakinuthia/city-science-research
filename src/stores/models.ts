@@ -1,10 +1,10 @@
-import { bbox, buffer } from '@turf/turf'
+import { bbox } from '@turf/turf'
 import type { FeatureCollection, Geometry } from 'geojson'
 import { defineStore } from 'pinia'
 import { ref, toRaw, watch } from 'vue'
 
 import { ACCENT, EMBER, LIGHT } from '../assets/palette'
-import { GEOMETRY, TIMING } from '../config'
+import { GEOMETRY, TIMING, WGS84 } from '../config'
 import { parseColorU32 } from '../sim/colors'
 import type { SimView } from '../sim/SimView'
 import { SimWorkerClient } from '../sim/workerClient'
@@ -94,23 +94,27 @@ export const useModelsStore = defineStore('models', () => {
       }
     }
 
-    // Derive bbox from both scenarios combined
-    const boundsA = bbox(
-      buffer(filterValidFeatures(scenarioA.surfaces) as any, GEOMETRY.bboxPaddingMeters, { units: 'meters' }),
+    // Both workers share a grid that covers the two study areas and their anchors.
+    const scenarioBounds = (scenario: ScenarioContainer) => bbox(
+      scenario.routing?.studyBoundary ?? filterValidFeatures(scenario.surfaces)!,
+      { recompute: true },
     )
-    const boundsB = bbox(
-      buffer(filterValidFeatures(scenarioB.surfaces) as any, GEOMETRY.bboxPaddingMeters, { units: 'meters' }),
-    )
-    const minLon = Math.min(boundsA[0], boundsB[0])
-    const minLat = Math.min(boundsA[1], boundsB[1])
-    const maxLon = Math.max(boundsA[2], boundsB[2])
-    const maxLat = Math.max(boundsA[3], boundsB[3])
-    const bounds: [number, number, number, number] = [minLon, minLat, maxLon, maxLat]
+    const boundsA = scenarioBounds(scenarioA)
+    const boundsB = scenarioBounds(scenarioB)
+    if (!boundsA.every(Number.isFinite) || !boundsB.every(Number.isFinite)) {
+      throw new Error('Tacubaya needs a valid extent for both scenarios.')
+    }
+    const south = Math.min(boundsA[1], boundsB[1])
+    const north = Math.max(boundsA[3], boundsB[3])
+    const latPad = GEOMETRY.bboxPaddingMeters * WGS84.degPerMeterEquator
+    const lonPad = latPad / Math.cos((south + north) * Math.PI / 360)
+    const bounds: [number, number, number, number] = [
+      Math.min(boundsA[0], boundsB[0]) - lonPad,
+      south - latPad,
+      Math.max(boundsA[2], boundsB[2]) + lonPad,
+      north + latPad,
+    ]
     const patchesWidth = computePatchesWidth(bounds, behaviorStore.targetPatchMeters)
-
-    // Spawn the worker and push initial state.
-    client = new SimWorkerClient()
-    const initialParams = behaviorStore.snapshotParams()
 
     // Unwrap each scenario container into plain data that structured-clone
     // can ship across the worker boundary.
@@ -121,14 +125,24 @@ export const useModelsStore = defineStore('models', () => {
       stalls: toPlainFeatureCollection(s.stalls),
       furniture: toPlainFeatureCollection(s.furniture),
       shade: toPlainFeatureCollection(s.shade),
+      routing: s.routing,
+    })
+    const scenarioDataA = plainScenario(scenarioA)
+    const scenarioDataB = plainScenario(scenarioB)
+
+    const workerClient = new SimWorkerClient()
+    client = workerClient
+    workerClient.onStats((msg) => {
+      if (msg.simIdx === 0) statsA.value = msg
+      else if (msg.simIdx === 1) statsB.value = msg
     })
 
-    const initResult = await client.init({
+    const initResult = await workerClient.init({
       mode: 'dual',
       bbox: bounds,
       targetWidth: patchesWidth,
-      scenarioA: plainScenario(scenarioA),
-      scenarioB: plainScenario(scenarioB),
+      scenarioA: scenarioDataA,
+      scenarioB: scenarioDataB,
       // Clone into plain objects — sharedNodes items come from a Vue
       // reactive ref, and the nested `coords` tuple would otherwise be
       // a reactive Array Proxy that postMessage can't serialize.
@@ -143,7 +157,7 @@ export const useModelsStore = defineStore('models', () => {
           noEngagement: raw.noEngagement,
         }
       }),
-      params: initialParams,
+      params: behaviorStore.snapshotParams(),
       timing: {
         fps: TIMING.fps,
         fastModeMultiplier: TIMING.fastModeMultiplier,
@@ -156,6 +170,9 @@ export const useModelsStore = defineStore('models', () => {
         furnitureStops: [TRANSPARENT_U32, FURNITURE_STOP_U32],
         shadeStops: [TRANSPARENT_U32, SHADE_STOP_U32],
       },
+    }).catch((error) => {
+      if (client === workerClient) disposeClient()
+      throw error
     })
 
     viewA.value = initResult.views[0] ?? null
@@ -174,12 +191,6 @@ export const useModelsStore = defineStore('models', () => {
       noEngagement: n.noEngagement,
       coords: sharedNodes.find((s) => s.id === n.id)?.coords,
     }))
-
-    // Wire stats callbacks
-    client.onStats((msg) => {
-      if (msg.simIdx === 0) statsA.value = msg
-      else if (msg.simIdx === 1) statsB.value = msg
-    })
 
     // Set up a reactive watcher that pushes behavior-param changes to the
     // worker whenever any slider or toggle moves. `flush: 'sync'` to

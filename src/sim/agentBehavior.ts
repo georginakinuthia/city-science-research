@@ -32,6 +32,7 @@ import {
   WEIDMANN,
 } from '../config'
 import { type OrcaAgent, type OrcaParams, solveORCA } from '../models/orca'
+import { DemographicProfile, requiresStepFree } from '../stores/geo'
 
 import {
   type AdvanceResult,
@@ -176,6 +177,30 @@ function agentRandom(id: number, salt: number): number {
 
 function agentSignedRandom(id: number, salt: number): number {
   return agentRandom(id, salt) * 2 - 1
+}
+
+function demographicRandom(id: number, salt: number): number {
+  // Mix high and low bits so consecutive IDs sample the whole distribution.
+  let hash = fnv1aHash2(id, salt)
+  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b)
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35)
+  return ((hash ^ (hash >>> 16)) >>> 0) / 0x1_0000_0000
+}
+
+function demographicProfile(roll: number): DemographicProfile {
+  // Illustrative shares. Split the former commuter and reduced-mobility
+  // cohorts while retaining the prior caregiver share.
+  if (roll < 0.35) return DemographicProfile.standard
+  if (roll < 0.6) return DemographicProfile.isFemale
+  if (roll < 0.85) return DemographicProfile.hasChild
+  if (roll < 0.95) return DemographicProfile.isOlderAdult
+  return DemographicProfile.hasDisability
+}
+
+function baseAgentSpeed(profile: DemographicProfile, id: number, baseline: number): number {
+  if (requiresStepFree(profile)) return 0.6 + 0.25 * demographicRandom(id, 7)
+  const spread = baseline * (SPEED.spreadBase + clamp01(_p.behaviorDiversity) * SPEED.spreadDiversityScale)
+  return Math.max(SPEED.minAgentSpeed, baseline + agentSignedRandom(id, 7) * spread)
 }
 
 const _densityOut = { oncoming: 0, areal: 0 }
@@ -328,8 +353,15 @@ const candDensity = new Float64Array(MAX_CANDIDATES)
 const candAreal = new Float64Array(MAX_CANDIDATES)
 const candObstacle = new Float64Array(MAX_CANDIDATES)
 const candShade = new Float64Array(MAX_CANDIDATES)
+const candRouteCost = new Float64Array(MAX_CANDIDATES)
 const candJitterHash = new Int32Array(MAX_CANDIDATES)
 const candUtilities = new Float64Array(MAX_CANDIDATES)
+
+function directTargetHeading(sim: Simulation, i: number): number {
+  const dx = sim.pedTargetX[i]! - sim.pedX[i]!
+  const dy = sim.pedTargetY[i]! - sim.pedY[i]!
+  return radToCompassDeg(Math.atan2(-dy, dx))
+}
 
 function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseDeltaTime): number {
   const cellIdx = sim.pedCellIdx[i]!
@@ -339,8 +371,14 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
   const neighborTable = sim.walkableNeighborTable
   const width = sim.width
 
-  const nodeIdx = sim.pedTargetNodeIdx[i]!
-  const nodeField = nodeIdx >= 0 ? sim.nodeDistanceFields[nodeIdx] : undefined
+  const profile = sim.pedProfile[i]!
+  const nodeField = sim.agentDistanceField(i)
+  const routing = sim.routingCosts
+  const stepFree = requiresStepFree(profile) ? routing?.stepFree : undefined
+  const routeCosts = profile === DemographicProfile.isFemale ? routing?.female
+    : profile === DemographicProfile.hasChild ? routing?.child : undefined
+  const tDist = nodeField?.[cellIdx] ?? Infinity
+  if (!Number.isFinite(tDist)) return stepFree ? sim.pedHeading[i]! : directTargetHeading(sim, i)
   const tx = sim.pedX[i]!
   const ty = sim.pedY[i]!
 
@@ -356,7 +394,8 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     headVecDy = sim.pedHeadingDy[i]!
   }
 
-  const tDist = nodeField ? (nodeField[cellIdx] ?? Infinity) : Infinity
+  const cellX = cellIdx % width
+  const cellY = (cellIdx / width) | 0
   const { densityLookahead, shadeLookahead } = ROUTE_CHOICE
 
   const shadeActive = _p.isSunny && getLocalDensity(sim, i) < SURFACE.shadeDensityGate
@@ -364,6 +403,7 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
   let candCount = 0
   let maxDistGain = -Infinity
   let maxDensity = 0
+  let minRouteCost = Infinity
   const agentId = sim.pedId[i]!
 
   const neighborBase = cellIdx * 9
@@ -371,12 +411,18 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
   for (let k = 1; k <= neighborCount; k++) {
     const nIdx = neighborTable[neighborBase + k]!
 
-    const nDist = nodeField ? (nodeField[nIdx] ?? Infinity) : Infinity
+    const nDist = nodeField?.[nIdx] ?? Infinity
     const distGain = tDist - nDist
     if (distGain < 0) continue
 
     const nx = nIdx % width
     const ny = (nIdx / width) | 0
+    if (stepFree && !isStepFreePath(sim, stepFree, tx, ty, nx, ny)) continue
+    const pathCost = routeCosts
+      ? nDist + Math.hypot(nx - cellX, ny - cellY) *
+        (routeCosts[cellIdx]! + routeCosts[nIdx]!) / 2
+      : 0
+    minRouteCost = Math.min(minRouteCost, pathCost)
     const dx = nx - tx
     const dy = ny - ty
     const dist = Math.hypot(dx, dy)
@@ -403,6 +449,7 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     candAreal[candCount] = areal
     candObstacle[candCount] = obstacle
     candShade[candCount] = shade
+    candRouteCost[candCount] = pathCost
     candJitterHash[candCount] =
       fnv1aHash3(agentId, Math.round(nx * 1000) >>> 0, Math.round(ny * 1000) >>> 0) | 0
     candCount++
@@ -419,7 +466,9 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     const biasWeight = sim.pedRouteBiasWeight[i]!
 
     let maxU = -Infinity
-    const effectiveDensityBeta = _p.debugDensityEnabled ? _p.debugDensityBeta : 0
+    let bestCandidate = 0
+    const densityWeight = profile === DemographicProfile.hasChild ? 1.5 : 1
+    const effectiveDensityBeta = _p.debugDensityEnabled ? _p.debugDensityBeta * densityWeight : 0
     for (let k = 0; k < candCount; k++) {
       const vDist = candDistGain[k]! * distNorm
       const vDensity = candDensity[k]! * densityNorm
@@ -432,11 +481,20 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
         effectiveDensityBeta * vDensity +
         beta.obstacle * candObstacle[k]! +
         beta.shade * candShade[k]! +
-        biasWeight * biasDot +
+        biasWeight * biasDot -
+        3 * (candRouteCost[k]! - minRouteCost) +
         jitter * jitterScale
 
       candUtilities[k] = V
-      if (V > maxU) maxU = V
+      if (V > maxU) {
+        maxU = V
+        bestCandidate = k
+      }
+    }
+
+    if (stepFree) {
+      sim.pedPerceivedDensity[i] = candAreal[bestCandidate]!
+      return radToCompassDeg(Math.atan2(-candNdy[bestCandidate]!, candNdx[bestCandidate]!))
     }
 
     let totalWeight = 0
@@ -461,10 +519,7 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     }
   }
 
-  const dx = sim.pedTargetX[i]! - tx
-  const dy = sim.pedTargetY[i]! - ty
-  const rad = Math.atan2(-dy, dx)
-  return radToCompassDeg(rad)
+  return stepFree ? sim.pedHeading[i]! : directTargetHeading(sim, i)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -720,6 +775,38 @@ function applyAmenityInfluences(
 // Path / following / avoidance
 // ─────────────────────────────────────────────────────────────
 
+// Traverse every crossed cell so neither a large timestep nor a diagonal
+// movement through a blocked corner can bypass an accessibility barrier.
+function isStepFreePath(
+  sim: Simulation, mask: Uint8Array, x1: number, y1: number, x2: number, y2: number,
+): boolean {
+  if (!mask[sim.cellAt(x1, y1)] || !mask[sim.cellAt(x2, y2)]) return false
+  const width = sim.width
+  let x = Math.round(x1), y = Math.round(y1)
+  const endX = Math.round(x2), endY = Math.round(y2)
+  const dx = x2 - x1, dy = y2 - y1
+  const stepX = Math.sign(dx), stepY = Math.sign(dy)
+  const deltaX = 1 / Math.abs(dx), deltaY = 1 / Math.abs(dy)
+  let nextX = x === endX ? Infinity : (x + stepX / 2 - x1) / dx
+  let nextY = y === endY ? Infinity : (y + stepY / 2 - y1) / dy
+  while (x !== endX || y !== endY) {
+    const crossX = nextX <= nextY + EPSILON
+    const crossY = nextY <= nextX + EPSILON
+    if (crossX && crossY &&
+        (!mask[y * width + x + stepX] || !mask[(y + stepY) * width + x])) return false
+    if (crossX) {
+      x += stepX
+      nextX = x === endX ? Infinity : nextX + deltaX
+    }
+    if (crossY) {
+      y += stepY
+      nextY = y === endY ? Infinity : nextY + deltaY
+    }
+    if (!mask[y * width + x]) return false
+  }
+  return true
+}
+
 function isPathClear(sim: Simulation, x1: number, y1: number, x2: number, y2: number): boolean {
   const surfacePotential = sim.surfacePotential
   const len = surfacePotential.length
@@ -814,8 +901,12 @@ function wouldLeaveWalkable(sim: Simulation, i: number, headingDeg: number, dist
   const rad = compassDegToRad(headingDeg)
   const dx = Math.cos(rad) * dist
   const dy = -Math.sin(rad) * dist
-  const probeX = Math.round(sim.pedX[i]! + dx)
-  const probeY = Math.round(sim.pedY[i]! + dy)
+  const x = sim.pedX[i]!
+  const y = sim.pedY[i]!
+  const stepFree = requiresStepFree(sim.pedProfile[i]!) ? sim.routingCosts?.stepFree : undefined
+  if (stepFree) return !isStepFreePath(sim, stepFree, x, y, x + dx, y + dy)
+  const probeX = Math.round(x + dx)
+  const probeY = Math.round(y + dy)
   const idx = sim.cellAt(probeX, probeY)
   if (idx < 0) return true
   return (sim.surfacePotential[idx] ?? 0) < 0
@@ -1043,8 +1134,11 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
 
   const tx = sim.pedX[i]!
   const ty = sim.pedY[i]!
-  const targetDist = Math.hypot(sim.pedTargetX[i]! - tx, sim.pedTargetY[i]! - ty)
-  if (targetDist <= _p.arrivalRadius) {
+  const targetX = sim.pedTargetX[i]!
+  const targetY = sim.pedTargetY[i]!
+  const stepFree = requiresStepFree(sim.pedProfile[i]!) ? sim.routingCosts?.stepFree : undefined
+  const targetDist = Math.hypot(targetX - tx, targetY - ty)
+  if (targetDist <= _p.arrivalRadius && (!stepFree || isStepFreePath(sim, stepFree, tx, ty, targetX, targetY))) {
     sim.killAgent(i)
     out.hasArrived = true
     return
@@ -1070,16 +1164,16 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
 
   const stepDistance = safeSpeed * stepDt
   if (Number.isFinite(stepDistance) && stepDistance > 0) {
-    const prevX = sim.pedX[i]!
-    const prevY = sim.pedY[i]!
-    sim.advanceAgentForward(i, stepDistance)
+    sim.advanceAgentForward(i, stepDistance / (sim.routingCosts ? sim.metersPerCell : 1))
 
     const landedIdx = sim.pedCellIdx[i]!
     const landedPotential = landedIdx >= 0 ? (sim.surfacePotential[landedIdx] ?? 0) : -1
     const pathBlocked =
-      landedPotential < 0 || !isPathClear(sim, prevX, prevY, sim.pedX[i]!, sim.pedY[i]!)
+      landedPotential < 0 || (stepFree
+        ? !isStepFreePath(sim, stepFree, tx, ty, sim.pedX[i]!, sim.pedY[i]!)
+        : !isPathClear(sim, tx, ty, sim.pedX[i]!, sim.pedY[i]!))
     if (pathBlocked) {
-      sim.setAgentPosition(i, prevX, prevY)
+      sim.setAgentPosition(i, tx, ty)
     } else {
       out.distanceTraveled += stepDistance
     }
@@ -1087,8 +1181,9 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
 
   const newTx = sim.pedX[i]!
   const newTy = sim.pedY[i]!
-  const remainingDist = Math.hypot(sim.pedTargetX[i]! - newTx, sim.pedTargetY[i]! - newTy)
-  if (remainingDist <= _p.arrivalRadius) {
+  const remainingDist = Math.hypot(targetX - newTx, targetY - newTy)
+  if (remainingDist <= _p.arrivalRadius &&
+      (!stepFree || isStepFreePath(sim, stepFree, newTx, newTy, targetX, targetY))) {
     sim.killAgent(i)
     out.hasArrived = true
   }
@@ -1109,13 +1204,16 @@ export function initialiseAgent(
   destNode: SpawnNode,
   shopProb: number,
   waitProb: number,
+  initialPosition?: readonly [number, number],
 ): void {
   if (startNode.worldX == null || startNode.worldY == null) {
     console.warn('Start node missing world coordinates:', startNode)
+    sim.killAgent(i)
     return
   }
   if (destNode.worldX == null || destNode.worldY == null) {
     console.warn('Destination node missing world coordinates:', destNode)
+    sim.killAgent(i)
     return
   }
 
@@ -1124,7 +1222,11 @@ export function initialiseAgent(
   sim.pedStartNodeIdx[i] = startNodeIdx
   sim.pedTargetNodeIdx[i] = targetNodeIdx
 
-  sim.setAgentPosition(i, Math.round(startNode.worldX), Math.round(startNode.worldY))
+  sim.setAgentPosition(
+    i,
+    initialPosition?.[0] ?? Math.round(startNode.worldX),
+    initialPosition?.[1] ?? Math.round(startNode.worldY),
+  )
   sim.pedTargetX[i] = Math.round(destNode.worldX)
   sim.pedTargetY[i] = Math.round(destNode.worldY)
 
@@ -1134,35 +1236,18 @@ export function initialiseAgent(
 
   const agentId = sim.pedId[i]!
 
-  // ── 3 Defined Pedestrian Profiles (Buen Camino Benchmark) ──────────
-  // Deterministic roll per agent ID: 60% Commuters, 25% Caregivers, 15% Reduced Mobility
-  const profileRoll = agentRandom(agentId, 99)
-  let profileBaseSpeed = 1.2 // default m/s (FHWA P01 baseline)
-  let defaultShopProb = 0.05
-  let defaultWaitProb = 0.05
+  const profile = demographicProfile(demographicRandom(agentId, 99))
+  const hasChild = profile === DemographicProfile.hasChild
+  const needsStepFree = requiresStepFree(profile)
+  sim.pedProfile[i] = profile
+  sim.pedSpeed[i] = baseAgentSpeed(profile, agentId, hasChild ? 1 : 1.2)
 
-  if (profileRoll < 0.6) {
-    // Profile 1: Commuters / Direct Transit (60%)
-    profileBaseSpeed = 1.2
-    defaultShopProb = 0.02
-    defaultWaitProb = 0.02
-  } else if (profileRoll < 0.85) {
-    // Profile 2: Caregivers & Families / Women with Children (25%)
-    profileBaseSpeed = 1.0
-    defaultShopProb = 0.35 // higher pull toward vendor stalls & shade
-    defaultWaitProb = 0.2
-  } else {
-    // Profile 3: Reduced Mobility & Older Adults (15%) (FHWA P03/P04 baseline)
-    profileBaseSpeed = 0.8
-    defaultShopProb = 0.05
-    defaultWaitProb = 0.15
+  if (needsStepFree && sim.routingCosts &&
+      !Number.isFinite(sim.agentDistanceField(i)?.[sim.pedCellIdx[i]!])) {
+    // An inaccessible origin/destination pair cannot complete a step-free trip.
+    sim.killAgent(i)
+    return
   }
-
-  // Apply individual speed variation based on profile baseline
-  const speedSpread =
-    profileBaseSpeed * (SPEED.spreadBase + dispersion * SPEED.spreadDiversityScale)
-  const speedOffset = agentSignedRandom(agentId, 7) * speedSpread
-  sim.pedSpeed[i] = Math.max(SPEED.minAgentSpeed, profileBaseSpeed + speedOffset)
 
   let heading = getTargetHeading(sim, i)
   heading = normalizeDeg(heading)
@@ -1186,6 +1271,8 @@ export function initialiseAgent(
   sim.pedRouteBiasWeight[i] = biasStrength
 
   // Set engagement probabilities per profile
+  const defaultShopProb = hasChild ? 0.35 : needsStepFree ? 0.05 : 0.02
+  const defaultWaitProb = hasChild ? 0.2 : needsStepFree ? 0.15 : 0.02
   sim.pedShopProb[i] = Number.isFinite(shopProb) ? shopProb : defaultShopProb
   sim.pedWaitProb[i] = Number.isFinite(waitProb) ? waitProb : defaultWaitProb
   sim.pedNoEngagement[i] = startNode.noEngagement === true ? 1 : 0
@@ -1201,9 +1288,7 @@ export function recomputeAgentParams(sim: Simulation, i: number): void {
   const dispersion = clamp01(_p.behaviorDiversity)
   const agentId = sim.pedId[i]!
 
-  const speedSpread = _p.speedBase * (SPEED.spreadBase + dispersion * SPEED.spreadDiversityScale)
-  const speedOffset = agentSignedRandom(agentId, 7) * speedSpread
-  sim.pedSpeed[i] = Math.max(SPEED.minAgentSpeed, _p.speedBase + speedOffset)
+  sim.pedSpeed[i] = baseAgentSpeed(sim.pedProfile[i]!, agentId, _p.speedBase)
 
   const baseMomentum = Math.min(clamp01(MOMENTUM.base), MOMENTUM.maxPreference)
   const momentumSpread = dispersion * MOMENTUM.spreadScale

@@ -1,9 +1,37 @@
 // Pure geographic/algorithmic functions extracted from scenarios.ts
 // Separated so they can be tested without triggering Pinia/Vue imports.
 
-import type { FeatureCollection, Geometry } from 'geojson'
+import { pointOnFeature } from '@turf/turf'
+import type { Feature, FeatureCollection, Geometry, MultiPolygon, Point, Polygon, Position } from 'geojson'
 
 import { GEOMETRY, WGS84 } from '../config'
+
+/** Places display markers on features without changing the simulation geometry. */
+export function toMarkerPoints(collection: FeatureCollection<Geometry>): FeatureCollection<Point> {
+  return {
+    type: 'FeatureCollection',
+    features: collection.features.flatMap((feature) => {
+      if (!feature?.geometry) return []
+      const { geometry, properties } = feature
+
+      let positions: Position[]
+      try {
+        positions = geometry.type === 'MultiPoint' ? geometry.coordinates
+          : [geometry.type === 'Point' ? geometry.coordinates : pointOnFeature(feature).geometry.coordinates]
+      } catch {
+        return []
+      }
+      if (!Array.isArray(positions)) return []
+      return positions.filter((position) =>
+        Number.isFinite(position?.[0]) && Number.isFinite(position?.[1]),
+      ).map((coordinates) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates },
+        properties,
+      }))
+    }),
+  }
+}
 
 /**
  * Minimal grid interface satisfied by `Simulation` and by the test stub
@@ -13,6 +41,7 @@ import { GEOMETRY, WGS84 } from '../config'
 export interface GridLike {
   readonly width: number
   readonly height: number
+  readonly metersPerCell?: number
   lonToX(lon: number): number
   latToY(lat: number): number
 }
@@ -43,6 +72,7 @@ export interface ScenarioData {
   shade: FeatureCollection<Geometry>
   stalls: FeatureCollection<Geometry>
   furniture: FeatureCollection<Geometry>
+  routing?: RoutingData
   // cached potentials surfaces (added at runtime)
   surfacesPotentials?: Float32Array
   stallsPotentials?: Float32Array
@@ -50,6 +80,38 @@ export interface ScenarioData {
   shadePotentials?: Float32Array
   // per-node shortest path distance fields (includes curvature penalty)
   nodeDistanceFields?: Map<string, Float32Array>
+}
+
+export interface CrowdAnchors {
+  walkways: [number, number][]
+  destinations: [number, number][]
+  busStops?: [number, number][]
+}
+
+export interface RoutingData {
+  transport: FeatureCollection<Geometry>
+  walkways: FeatureCollection<Geometry>
+  studyBoundary?: FeatureCollection<Polygon | MultiPolygon>
+  crowd?: CrowdAnchors
+}
+
+export enum DemographicProfile {
+  standard,
+  isFemale,
+  hasChild,
+  isOlderAdult,
+  hasDisability,
+}
+
+export function requiresStepFree(profile: DemographicProfile): boolean {
+  return profile === DemographicProfile.isOlderAdult || profile === DemographicProfile.hasDisability
+}
+
+export interface RoutingCosts {
+  walkable: Uint8Array
+  stepFree: Uint8Array
+  female: Float32Array
+  child: Float32Array
 }
 
 // Constants for potential field decay rates (in meters)
@@ -64,13 +126,18 @@ export const DECAY_FACTORS = {
 // Simplified scanline algorithm — returns Uint8Array length width*height with 1 for inside.
 export function featureMask(col: any, grid: GridLike): Uint8Array {
   const features = Array.isArray(col?.features) ? col.features : []
+  const inside = new Uint8Array(grid.width * grid.height)
+  rasterizePolygons(features, grid, (index) => { inside[index] = 1 })
+  return inside
+}
+
+function rasterizePolygons(
+  features: Feature<Geometry>[],
+  grid: GridLike,
+  mark: (index: number) => void,
+): void {
   const width = grid.width
   const height = grid.height
-  const inside = new Uint8Array(width * height)
-
-  if (features.length === 0) return inside
-
-  const patchIndex = (x: number, y: number) => y * width + x
 
   for (const feat of features) {
     if (!feat?.geometry) continue
@@ -133,15 +200,182 @@ export function featureMask(col: any, grid: GridLike): Uint8Array {
           const xa = Math.max(x0, Math.ceil(ik))
           const xb = Math.min(x1, Math.floor(ink))
           for (let x = xa; x <= xb; x++) {
-            const idx = patchIndex(x, y)
-            if (idx >= 0 && idx < inside.length) inside[idx] = 1
+            mark(y * width + x)
           }
         }
       }
     }
   }
 
-  return inside
+}
+
+// Route data may be mapped as points, centerlines or areas. A radius in cell
+// units gives centerlines a usable footprint and lets nearby sidewalks see transit.
+function rasterizeRoute(
+  geometry: Geometry,
+  grid: GridLike,
+  radius: number,
+  mark: (index: number) => void,
+): void {
+  const radiusSquared = radius * radius
+  const markSegment = (a: Position, b: Position) => {
+    const ax = grid.lonToX(a[0]!), ay = grid.latToY(a[1]!)
+    const bx = grid.lonToX(b[0]!), by = grid.latToY(b[1]!)
+    const dx = bx - ax, dy = by - ay
+    const lengthSquared = dx * dx + dy * dy
+    const x0 = Math.max(0, Math.ceil(Math.min(ax, bx) - radius))
+    const x1 = Math.min(grid.width - 1, Math.floor(Math.max(ax, bx) + radius))
+    const y0 = Math.max(0, Math.ceil(Math.min(ay, by) - radius))
+    const y1 = Math.min(grid.height - 1, Math.floor(Math.max(ay, by) + radius))
+    if (x1 < x0 || y1 < y0) return
+    for (let y = y0; y <= y1; y++) {
+      const yOffset = y - ay
+      let left = x0
+      let right = x1
+      if (dx !== 0 && dy !== 0) {
+        // Only the part of the segment within this row's vertical radius can contribute.
+        const start = Math.max(0, Math.min(1, (yOffset - radius) / dy))
+        const end = Math.max(0, Math.min(1, (yOffset + radius) / dy))
+        const rowStartX = ax + start * dx
+        const rowEndX = ax + end * dx
+        // Round outward to keep edge candidates despite interpolation rounding.
+        left = Math.max(x0, Math.floor(Math.min(rowStartX, rowEndX) - radius))
+        right = Math.min(x1, Math.ceil(Math.max(rowStartX, rowEndX) + radius))
+      }
+      for (let x = left; x <= right; x++) {
+        const fraction = lengthSquared === 0 ? 0 :
+          Math.max(0, Math.min(1, ((x - ax) * dx + yOffset * dy) / lengthSquared))
+        if ((x - ax - fraction * dx) ** 2 + (yOffset - fraction * dy) ** 2 <= radiusSquared) {
+          mark(y * grid.width + x)
+        }
+      }
+    }
+  }
+  const markLine = (line: Position[]) => {
+    for (let i = 1; i < line.length; i++) markSegment(line[i - 1]!, line[i]!)
+  }
+  switch (geometry.type) {
+    case 'Point':
+      markSegment(geometry.coordinates, geometry.coordinates)
+      break
+    case 'MultiPoint':
+      for (const point of geometry.coordinates) markSegment(point, point)
+      break
+    case 'LineString':
+      markLine(geometry.coordinates)
+      break
+    case 'MultiLineString':
+      geometry.coordinates.forEach(markLine)
+      break
+    case 'Polygon':
+    case 'MultiPolygon': {
+      rasterizePolygons([{ type: 'Feature', geometry, properties: null }], grid, mark)
+      const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates
+      for (const rings of polygons) rings.forEach(markLine)
+      break
+    }
+    case 'GeometryCollection':
+      for (const part of geometry.geometries) rasterizeRoute(part, grid, radius, mark)
+      break
+  }
+}
+
+export function walkwayMask(data: RoutingData['walkways'], grid: GridLike): Uint8Array {
+  const mask = new Uint8Array(grid.width * grid.height)
+  const radius = Math.max(Math.SQRT1_2, 1.25 / (grid.metersPerCell ?? 1))
+  for (const { geometry } of data.features) {
+    if (geometry) rasterizeRoute(geometry, grid, radius, (index) => { mask[index] = 1 })
+  }
+  return mask
+}
+
+function flag(value: unknown): boolean | undefined {
+  switch (String(value).trim().toLowerCase()) {
+    case '1':
+    case 'true':
+    case 'yes':
+      return true
+    case '0':
+    case 'false':
+    case 'no':
+      return false
+  }
+}
+
+function measurement(value: unknown): number | undefined {
+  if (typeof value !== 'number' && typeof value !== 'string') return
+  const text = String(value).trim().replace(/\s*(?:m|%)$/i, '')
+  const number = Number(text)
+  if (text && Number.isFinite(number)) return number
+}
+
+export function buildRoutingCosts(
+  data: RoutingData,
+  grid: GridLike,
+  walkable: Uint8Array,
+  stallPotential: Float32Array | undefined,
+): RoutingCosts {
+  const count = walkable.length
+  const stepFree = walkable.slice()
+  const lighting = new Int8Array(count) // -1 unlit, 0 unknown, 1 lit
+  const activity = new Uint8Array(count)
+  const walkwayWidth = new Float32Array(count)
+  const conflicts = new Uint8Array(count)
+  const stallCongestion = new Float32Array(count)
+  const scale = grid.metersPerCell ?? 1
+
+  for (const [collection, transit] of [[data.transport, true], [data.walkways, false]] as const) {
+    for (const { geometry, properties } of collection.features) {
+      if (!geometry) continue
+      const p = properties ?? {}
+      const width = measurement(p.width_m ?? p.width)
+      const lit = flag(p.lit ?? p.well_lit ?? p.lighting)
+      const crossing = String(p.crossing ?? '').trim().toLowerCase()
+      const conflict = flag(p.high_conflict) === true ||
+        ['high', 'severe'].includes(String(p.crossing_conflict).toLowerCase()) ||
+        ['uncontrolled', 'unmarked'].includes(crossing)
+      const congestion = ['heavy', 'high'].includes(String(p.stall_congestion).toLowerCase()) ? 1 :
+        Math.max(0, Math.min(1, measurement(p.stall_congestion) ?? 0))
+      const grade = measurement(p.grade_pct ?? p.slope_pct ?? p.incline_pct ?? p.incline ?? p.grade)
+      const steps = String(p.highway).toLowerCase() === 'steps' || flag(p.steps ?? p.stairs) === true ||
+        (measurement(p.step_count ?? p.steps ?? p.stairs) ?? 0) > 0
+      const stepFreeTag = flag(p.step_free)
+      const hasBarrier = Boolean(p.barrier) && flag(p.barrier) !== false
+      // Grade attributes are expressed as percent. Unknown grades stay neutral.
+      const tooSteep = flag(p.steep) === true || String(p.incline).toLowerCase() === 'steep' ||
+        (grade !== undefined && Math.abs(grade) > 8)
+      const blocked = stepFreeTag === false || steps || tooSteep ||
+        (hasBarrier && stepFreeTag !== true && flag(p.ramp) !== true)
+      const radius = Math.max(Math.SQRT1_2, Math.min(width ?? 2.5, 12) / (2 * scale))
+
+      const active = flag(p.active)
+      if (active === true || (transit && active !== false)) {
+        rasterizeRoute(geometry, grid, Math.max(radius, 10 / scale), (i) => { activity[i] = 1 })
+      }
+      if (!transit || lit !== undefined || conflict || blocked || congestion > 0) {
+        rasterizeRoute(geometry, grid, radius, (i) => {
+          if (!transit) walkwayWidth[i] = Math.max(walkwayWidth[i]!, width ?? 2.5)
+          if (lit === false) lighting[i] = -1
+          else if (lit === true && lighting[i] === 0) lighting[i] = 1
+          if (conflict) conflicts[i] = 1
+          if (blocked) stepFree[i] = 0
+          if (congestion > 0) stallCongestion[i] = Math.max(stallCongestion[i]!, congestion)
+        })
+      }
+    }
+  }
+
+  const female = new Float32Array(count)
+  const child = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    const lightCost = lighting[i] === -1 ? 3 : lighting[i] === 1 ? 0 : 0.75
+    female[i] = 0.65 + lightCost + (activity[i] ? 0 : 0.85)
+    const widthBenefit = Math.min(0.65, walkwayWidth[i]! / 5)
+    const nearbyStalls = Math.max(0, 1 + (stallPotential?.[i] ?? -1))
+    const congestion = Math.max(nearbyStalls, stallCongestion[i]!)
+    child[i] = 1.35 - widthBenefit + 2 * congestion + (conflicts[i] ? 4 : 0)
+  }
+  return { walkable, stepFree, female, child }
 }
 
 // Priority queue for Dijkstra's algorithm
@@ -169,58 +403,47 @@ export class MinHeap {
   }
 
   private bubbleUp(idx: number) {
+    const entry = this.heap[idx]!
     while (idx > 0) {
       const parentIdx = Math.floor((idx - 1) / 2)
-      if (this.heap[idx]!.dist >= this.heap[parentIdx]!.dist) break
-      ;[this.heap[idx], this.heap[parentIdx]] = [this.heap[parentIdx]!, this.heap[idx]!]
+      const parent = this.heap[parentIdx]!
+      if (entry.dist >= parent.dist) break
+      this.heap[idx] = parent
       idx = parentIdx
     }
+    this.heap[idx] = entry
   }
 
   private bubbleDown(idx: number) {
-    while (true) {
-      let minIdx = idx
-      const leftIdx = 2 * idx + 1
-      const rightIdx = 2 * idx + 2
-
-      if (leftIdx < this.heap.length && this.heap[leftIdx]!.dist < this.heap[minIdx]!.dist) {
-        minIdx = leftIdx
-      }
-      if (rightIdx < this.heap.length && this.heap[rightIdx]!.dist < this.heap[minIdx]!.dist) {
-        minIdx = rightIdx
-      }
-      if (minIdx === idx) break
-      ;[this.heap[idx], this.heap[minIdx]] = [this.heap[minIdx]!, this.heap[idx]!]
+    const entry = this.heap[idx]!
+    let leftIdx = 2 * idx + 1
+    while (leftIdx < this.heap.length) {
+      const rightIdx = leftIdx + 1
+      const minIdx = rightIdx < this.heap.length && this.heap[rightIdx]!.dist < this.heap[leftIdx]!.dist
+        ? rightIdx : leftIdx
+      const child = this.heap[minIdx]!
+      if (child.dist >= entry.dist) break
+      this.heap[idx] = child
       idx = minIdx
+      leftIdx = 2 * idx + 1
     }
+    this.heap[idx] = entry
   }
 }
 
-// Multi-source geodesic distance confined to a walkable mask.
-// sourceMask: Uint8Array with 1 for source pixels (feature pixels), 0 otherwise
-// walkMask: Uint8Array with 1 for walkable cells, 0 for non-walkable
-export function computeShortestPath(
-  sourceMask: Uint8Array,
-  walkMask: Uint8Array,
-  grid: GridLike,
-): Float32Array {
-  const width = grid.width
-  const height = grid.height
+/** Obstacle penalties depend on the walkability mask, so routes can share them. */
+export function computeEdgePenalties(walkMask: Uint8Array, grid: GridLike): Float32Array {
+  const { width, height } = grid
   const numP = width * height
 
-  const distances = new Float32Array(numP)
-  for (let i = 0; i < numP; i++) distances[i] = Infinity
-
-  const patchIndex = (x: number, y: number) => y * width + x
-
   // Pre-compute graduated edge penalties: cost increases near obstacles,
-  // decaying linearly from edgePenaltyFactor at the boundary to 1.0 at penaltyRadius.
+  // decaying quadratically from edgePenaltyFactor to 1.0 at penaltyRadius.
   // This creates smooth distance-field contours that curve around obstacles
   // rather than hugging walls — agents aim for gap openings from several metres away.
   const EDGE_PENALTY_FACTOR = GEOMETRY.edgePenaltyFactor
   const PENALTY_RADIUS = GEOMETRY.edgePenaltyRadius ?? 1
 
-  // Step 1: BFS from all non-walkable/boundary cells to compute distance-to-obstacle
+  // Step 1: BFS from all non-walkable cells to compute distance to obstacles.
   const obstDist = new Float32Array(numP)
   for (let i = 0; i < numP; i++) obstDist[i] = Infinity
   const bfsQueue: number[] = []
@@ -250,7 +473,9 @@ export function computeShortestPath(
         if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
         const nIdx = ny * width + nx
         const stepCost = (dx !== 0 && dy !== 0) ? Math.SQRT2 : 1
-        const newDist = d + stepCost
+        // Compare at the stored precision so an unchanged diagonal distance
+        // never adds the same cell to the queue again.
+        const newDist = Math.fround(d + stepCost)
         if (newDist < obstDist[nIdx]!) {
           obstDist[nIdx] = newDist
           bfsQueue.push(nIdx)
@@ -271,7 +496,32 @@ export function computeShortestPath(
       edgePenalty[i] = 1.0 + (EDGE_PENALTY_FACTOR - 1.0) * t * t
     }
   }
+  return edgePenalty
+}
 
+// Multi-source geodesic distance confined to a walkable mask.
+// sourceMask: Uint8Array with 1 for source pixels (feature pixels), 0 otherwise
+// walkMask: Uint8Array with 1 for walkable cells, 0 for non-walkable
+interface RouteSearchOptions {
+  costs?: Float32Array
+  stepFree?: boolean
+  edgePenalties?: Float32Array
+}
+
+export function computeShortestPath(
+  sourceMask: Uint8Array,
+  walkMask: Uint8Array,
+  grid: GridLike,
+  options?: RouteSearchOptions,
+): Float32Array {
+  const { width, height } = grid
+  const numP = width * height
+
+  const distances = new Float32Array(numP)
+  for (let i = 0; i < numP; i++) distances[i] = Infinity
+
+  const patchIndex = (x: number, y: number) => y * width + x
+  const edgePenalty = options?.edgePenalties ?? computeEdgePenalties(walkMask, grid)
   const queue = new MinHeap()
   const visited = new Uint8Array(numP)
 
@@ -314,6 +564,9 @@ export function computeShortestPath(
     [1, 2, SQRT5, 0, 1],
   ]
 
+  // Profile fields use the same local neighbors as agent heading selection.
+  const neighborCount = options?.costs || options?.stepFree ? 8 : neighbors.length
+  const weights = options?.costs
   while (!queue.isEmpty()) {
     const current = queue.pop()
     if (!current) break
@@ -324,7 +577,7 @@ export function computeShortestPath(
     const x = idx % width
     const y = (idx / width) | 0
 
-    for (let dirIdx = 0; dirIdx < neighbors.length; dirIdx++) {
+    for (let dirIdx = 0; dirIdx < neighborCount; dirIdx++) {
       const [dx, dy, cost, midDx, midDy] = neighbors[dirIdx]!
       const nx = x + dx
       const ny = y + dy
@@ -332,6 +585,8 @@ export function computeShortestPath(
       const nIdx = ny * width + nx
       if (!walkMask[nIdx]) continue
       if (visited[nIdx]) continue
+      if (options?.stepFree && dx !== 0 && dy !== 0 &&
+          (!walkMask[patchIndex(nx, y)] || !walkMask[patchIndex(x, ny)])) continue
 
       // Knight's moves require the intermediate cell to be walkable
       if (midDx !== 0 || midDy !== 0) {
@@ -343,7 +598,8 @@ export function computeShortestPath(
       }
 
       // Apply edge penalty to discourage boundary-hugging
-      const penalizedCost = cost * edgePenalty[nIdx]!
+      const multiplier = weights ? (weights[idx]! + weights[nIdx]!) / 2 : 1
+      const penalizedCost = cost * edgePenalty[nIdx]! * multiplier
       const newDist = dist + penalizedCost
 
       // Only update if we found a shorter path
@@ -363,6 +619,7 @@ export function computeNodeDistanceField(
   nodeWorldPos: [number, number],
   grid: GridLike,
   walkabilityMask: Uint8Array, // 1 = walkable, 0 = obstacle
+  options?: RouteSearchOptions,
 ): Float32Array {
   const width = grid.width
   const height = grid.height
@@ -393,7 +650,7 @@ export function computeNodeDistanceField(
   const sourceMask = new Uint8Array(numP)
   sourceMask[startIdx] = 1
 
-  return computeShortestPath(sourceMask, walkabilityMask, grid)
+  return computeShortestPath(sourceMask, walkabilityMask, grid, options)
 }
 
 // ── Shared geodetic utilities ──────────────────────────────────

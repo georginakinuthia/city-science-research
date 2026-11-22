@@ -7,6 +7,7 @@ import {
   computeShortestPath,
   featureMask,
   MinHeap,
+  walkwayMask,
 } from '../geo'
 
 // Helper: create a mock GridLike with identity coordinate transform.
@@ -304,6 +305,34 @@ describe('featureMask', () => {
     expect(mask[patchIndex(7, 7, world)]).toBe(1)
     // Between polygons
     expect(mask[patchIndex(5, 5, world)]).toBe(0)
+  })
+})
+
+describe('walkwayMask', () => {
+  it('matches the grid-wide distance check for clipped diagonals and horizontal lines', () => {
+    const grid = createMockGrid(133, 89)
+    const segments: [[number, number], [number, number]][] = [
+      [[-39.2, 117.5], [161.3, -26.4]],
+      [[-60.31, -48.25], [187.15, 142.4]],
+      [[44.5, 85], [15.3, 11.4]],
+      [[5.5, 34.25], [122.3, 34.25]],
+    ]
+    for (const coordinates of segments) {
+      const mask = walkwayMask({
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: null, geometry: { type: 'LineString', coordinates } }],
+      }, grid)
+      const [[ax, ay], [bx, by]] = coordinates
+      const dx = bx - ax
+      const dy = by - ay
+      const expected = Uint8Array.from(mask, (_, i) => {
+        const x = i % grid.width - ax
+        const y = Math.floor(i / grid.width) - ay
+        const along = Math.max(0, Math.min(1, (x * dx + y * dy) / (dx ** 2 + dy ** 2)))
+        return Number(Math.hypot(x - along * dx, y - along * dy) <= 1.25)
+      })
+      expect(mask).toEqual(expected)
+    }
   })
 })
 

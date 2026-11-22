@@ -1,0 +1,19 @@
+full_id,osm_id,osm_type,building,shelter_type,height,building:levels,building:flats,addr:postcode,addr:city,layer,name:es,name:en,brand:wikipedia,brand:wikidata,brand:es,brand:en,brand,atm,toilets:disposal,payment:coins,access,shop,name,amenity,addr:street,addr:housenumber
+w44341051,"44341051",way,yes,,,,,,,,,,,,,,,,,,,,Mercado Peña Manterola,marketplace,Calle Arquitecto Luis Ruiz,"175"
+w217420245,"217420245",way,yes,,,,,,,,,,,,,,,,,,,furniture,Coppel Tacubaya,,,
+w668144604,"668144604",way,yes,,,,,,,,,,,,,,,,,,,,Crédito Familiar,bank,,
+w668144605,"668144605",way,yes,,,,,,,,,,,,,,,,,,,shoes,Zapaterías Andrea Tacubaya,,,
+w668144748,"668144748",way,yes,,,,,,,,,,,,,,,,bucket,yes,yes,,Baños Públicos,toilets,,
+w669996064,"669996064",way,yes,,,,,,,,,,,,,,,,,,,,,marketplace,,
+w787653021,"787653021",way,service,,,,,,,,Banco Azteca,Aztec Bank,en:Banco Azteca,Q4854076,Banco Azteca,Aztec Bank,Banco Azteca,yes,,,,,Banco Azteca,bank,Calle José Martí,
+w844395094,"844395094",way,roof,,,,,,,"1",,,en:Pemex,Q871308,,,Pemex,,,,,,Pemex,fuel,Periférico Boulevard Adolfo López Mateos,
+w1043288238,"1043288238",way,hospital,,,,,,,,,,,,,,,,,,,,Hospital Escandón,,,
+w1043288239,"1043288239",way,hospital,,,,,,,,,,,,,,,,,,,,"Hospital Pediátrico Tacubaya, SEDESA",,,
+w1085100342,"1085100342",way,apartments,,"21","6","2","11870","Miguel Hidalgo, Ciudad de Mexico",,,,,,,,,,,,,,Tordo 28,,Calle Tordo,"28"
+w1184092816,"1184092816",way,yes,,,,,,,,,,,,,,,,,,,,,,,
+w1184092817,"1184092817",way,roof,,,,,,,"1",,,,,,,,,,,,,,,,
+w1184092818,"1184092818",way,yes,,,,,,,,,,,,,,,,,,,,,,,
+w1250930942,"1250930942",way,yes,public_transport,,,,,,"-1",,,,,,,,,,,,,,shelter,,
+w1250930948,"1250930948",way,yes,,,,,,,,,,,,,,,,,,yes,,,toilets,,
+w1298636103,"1298636103",way,yes,,,,,,,,,,,,,,,,,,,,,,,
+w1298636104,"1298636104",way,yes,,,,,,,,,,,,,,,,,,,,,toilets,,

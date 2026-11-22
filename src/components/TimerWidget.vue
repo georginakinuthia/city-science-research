@@ -30,13 +30,13 @@ const props = defineProps({
     <div class="bg-darker flex items-stretch justify-evenly gap-8 rounded-lg px-6 py-3">
       <!-- Play controls -->
       <div class="flex items-center justify-center gap-2">
-        <button v-if="!store.isRunning" class="btn btn-icon" @click="store.start()">
+        <button v-if="!store.isRunning" class="btn btn-icon" aria-label="Play" @click="store.start()">
           <Play24Regular />
         </button>
-        <button v-else class="btn btn-icon" @click="store.stop()">
+        <button v-else class="btn btn-icon" aria-label="Stop" @click="store.stop()">
           <Stop24Regular />
         </button>
-        <button class="btn btn-icon" @click="store.reset()">
+        <button class="btn btn-icon" aria-label="Reset" @click="store.reset()">
           <ArrowReset24Regular />
         </button>
       </div>

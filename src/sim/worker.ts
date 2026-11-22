@@ -13,6 +13,7 @@
 
 import type { FeatureCollection, Geometry } from 'geojson'
 
+import { MAX_AGENTS } from '../config'
 import { type NodeState, spawnFromNodes } from '../stores/geo'
 import { setBehaviorParams } from './agentBehavior'
 import { ScenarioContainer } from './scenarioGen'
@@ -104,9 +105,20 @@ let workerNodesIndex: Map<string, NodeState> = new Map()
 self.onmessage = (e: MessageEvent<WorkerCommand>) => {
   const msg = e.data
   switch (msg.type) {
-    case 'INIT':
-      handleInit(msg)
+    case 'INIT': {
+      try {
+        handleInit(msg)
+      } catch (error) {
+        stopLoop()
+        sims = []
+        postReply({
+          type: 'INIT_ERROR',
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        })
+      }
       break
+    }
     case 'START':
       startLoop()
       break
@@ -152,6 +164,14 @@ self.onmessage = (e: MessageEvent<WorkerCommand>) => {
 // ─────────────────────────────────────────────────────────────
 
 function handleInit(msg: InitMessage): void {
+  const [west, south, east, north] = msg.bbox
+  if (!msg.bbox.every(Number.isFinite) || east <= west || north <= south ||
+      !Number.isInteger(msg.targetWidth) || msg.targetWidth < 1) {
+    throw new Error('Cannot initialize the simulation with an invalid grid.')
+  }
+  if (msg.mode === 'dual' && !msg.scenarioB) {
+    throw new Error('Scenario B is required for dual simulation mode.')
+  }
   mode = msg.mode
 
   // Install the initial params snapshot so scenario gen + first tick
@@ -239,6 +259,7 @@ function handleInit(msg: InitMessage): void {
         stalls: def.stalls as FeatureCollection<Geometry>,
         furniture: def.furniture as FeatureCollection<Geometry>,
         shade: def.shade as FeatureCollection<Geometry>,
+        routing: def.routing,
       },
       def.name,
     )
@@ -258,24 +279,20 @@ function handleInit(msg: InitMessage): void {
       transparent: msg.palette.transparent,
     })
 
-    // Seed the buffer pool with one snapshot worth of capacity for each
-    // sim — matches the initial pedestrian capacity allocated by
-    // Simulation (256). Worker will grow these as needed.
-    const cap = 256
+    // The dual map snapshots fit in these buffers from startup to saturation.
+    const cap = mode === 'dual' ? MAX_AGENTS : 256
     for (let k = 0; k < 2; k++) {
       state.bufferPool.push(allocSnapshotBuffers(cap))
     }
 
-    // Snapshot the static state for main-thread rendering. We DO NOT
-    // transfer cellColorBuffer here because the main thread's
-    // MapRenderer needs its own copy (the worker still uses it for
-    // scenario-gen bookkeeping). Structured-clone the Uint32Array.
+    // Keep the worker's color buffer and transfer a copy to the renderer.
     const staticState: SimStaticState = {
       width: state.sim.width,
       height: state.sim.height,
       bbox: [state.sim.bbox[0], state.sim.bbox[1], state.sim.bbox[2], state.sim.bbox[3]],
       cellColorBuffer: new Uint32Array(state.sim.cellColorBuffer), // copy
       nodeIdTable: [...state.sim.nodeIdTable],
+      initialSnapshot: buildSnapshot(state),
     }
     staticStates.push(staticState)
   }
@@ -294,7 +311,13 @@ function handleInit(msg: InitMessage): void {
       noEngagement: n.noEngagement,
     })),
   }
-  postReply(reply, staticStates.map((s) => s.cellColorBuffer.buffer))
+  postReply(reply, staticStates.flatMap((state) => [
+    state.cellColorBuffer.buffer,
+    ...collectTransferables(state.initialSnapshot),
+  ]))
+  if (mode === 'dual') {
+    for (const [index, state] of sims.entries()) publishStats(state, index)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -336,6 +359,12 @@ function handleReset(): void {
   for (const state of sims) {
     state.sim.reset()
   }
+  if (mode === 'dual') {
+    for (const [index, state] of sims.entries()) {
+      publishSnapshot(state, index)
+      publishStats(state, index)
+    }
+  }
 }
 
 function tick(): void {
@@ -371,47 +400,42 @@ function tick(): void {
     }
   }
 
-  // Produce and post snapshots for each sim
-  for (let simIdx = 0; simIdx < sims.length; simIdx++) {
-    const state = sims[simIdx]!
-    const snapshot = buildSnapshot(state)
-    const snapMsg: SnapshotMessage = { type: 'SNAPSHOT', simIdx, snapshot }
-    postReply(snapMsg, collectTransferables({
-      pedX: snapshot.pedX,
-      pedY: snapshot.pedY,
-      pedHeading: snapshot.pedHeading,
-      pedEngagementMode: snapshot.pedEngagementMode,
-      pedStartNodeIdx: snapshot.pedStartNodeIdx,
-      pedIntimateViolations: snapshot.pedIntimateViolations,
-      pedPersonalViolations: snapshot.pedPersonalViolations,
-      pedSocialViolations: snapshot.pedSocialViolations,
-    }))
-
-    // Also post a stats update. These are cheap and let the main thread
-    // UI update totals without reaching into the snapshot.
-    const statsMsg: StatsUpdateMessage = {
-      type: 'STATS',
-      simIdx,
-      totalArrivals: state.sim.totalArrivals,
-      arrivalsThisTick: state.sim.arrivalsThisTick,
-      totalMinutesShopped: state.sim.totalMinutesShopped,
-      totalMinutesWaited: state.sim.totalMinutesWaited,
-      totalSteps: state.sim.totalSteps,
-      totalNormalSteps: state.sim.totalNormalSteps,
-      totalNormalDistanceTraveled: state.sim.totalNormalDistanceTraveled,
-      totalNormalTime: state.sim.totalNormalTime,
-      totalPublicZoneSteps: state.sim.totalPublicZoneSteps,
-      totalIntimateZoneSteps: state.sim.totalIntimateZoneSteps,
-      totalPersonalZoneSteps: state.sim.totalPersonalZoneSteps,
-      totalSocialZoneSteps: state.sim.totalSocialZoneSteps,
-      currentAgents: snapshot.pedCount,
-      currentShopping: countEngagementMode(state.sim, ENGAGEMENT_SHOPPING),
-      currentWaiting: countEngagementMode(state.sim, ENGAGEMENT_WAITING),
-      elapsedSimSeconds,
-      globalTick,
-    }
-    postReply(statsMsg)
+  for (const [index, state] of sims.entries()) {
+    publishSnapshot(state, index)
+    publishStats(state, index)
   }
+}
+
+function publishStats(state: SimState, simIdx: number): void {
+  const { sim } = state
+  const statsMsg: StatsUpdateMessage = {
+    type: 'STATS',
+    simIdx,
+    totalArrivals: sim.totalArrivals,
+    arrivalsThisTick: sim.arrivalsThisTick,
+    totalMinutesShopped: sim.totalMinutesShopped,
+    totalMinutesWaited: sim.totalMinutesWaited,
+    totalSteps: sim.totalSteps,
+    totalNormalSteps: sim.totalNormalSteps,
+    totalNormalDistanceTraveled: sim.totalNormalDistanceTraveled,
+    totalNormalTime: sim.totalNormalTime,
+    totalPublicZoneSteps: sim.totalPublicZoneSteps,
+    totalIntimateZoneSteps: sim.totalIntimateZoneSteps,
+    totalPersonalZoneSteps: sim.totalPersonalZoneSteps,
+    totalSocialZoneSteps: sim.totalSocialZoneSteps,
+    currentAgents: sim.pedAliveCount,
+    currentShopping: countEngagementMode(sim, ENGAGEMENT_SHOPPING),
+    currentWaiting: countEngagementMode(sim, ENGAGEMENT_WAITING),
+    elapsedSimSeconds,
+    globalTick,
+  }
+  postReply(statsMsg)
+}
+
+function publishSnapshot(state: SimState, simIdx: number): void {
+  const snapshot = buildSnapshot(state)
+  const snapMsg: SnapshotMessage = { type: 'SNAPSHOT', simIdx, snapshot }
+  postReply(snapMsg, collectTransferables(snapshot))
 }
 
 // ─────────────────────────────────────────────────────────────

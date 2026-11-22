@@ -24,6 +24,19 @@ export const TIMING = {
   fastModeMultiplier: 4, // deltaTime multiplier in fast mode
 }
 
+export const MAX_AGENTS = 800
+
+// Peak transfer-wave demand distributed across the Tacubaya hub.
+export const TACUBAYA_CROWD = {
+  initialAgents: 400,
+  replenishmentThreshold: 650,
+  replenishmentBand: 250,
+  peakPph: 24_000,
+  entrySnapMeters: 30,
+  initialTargetLimit: 6,
+  initialTripMeters: 25,
+} as const
+
 // ── Route choice — Antonini, Bierlaire & Weber (2006) MNL structure ──
 // Patch-neighbor scoring follows a multinomial logit (MNL):
 //   V(patch_i) = β_dist · v_dist + β_align · v_align · straightness

@@ -1,0 +1,16 @@
+full_id,osm_id,osm_type,amenity,shelter_type,layer,name:es,name:en,brand:wikipedia,brand:wikidata,brand:es,brand:en,brand,atm,toilets:disposal,payment:coins,operator,barrier,surface,parking,fee,access,tourism,religion,public_transport,bus,name,building,addr:street,addr:housenumber
+w44341051,"44341051",way,marketplace,,,,,,,,,,,,,,,,,,,,,,,Mercado Peña Manterola,yes,Calle Arquitecto Luis Ruiz,"175"
+w217420246,"217420246",way,bus_station,,,,,,,,,,,,,,,,,,,,,station,yes,CETRAM Tacubaya,,,
+w219478032,"219478032",way,place_of_worship,,,,,,,,,,,,,,,,,,,attraction,christian,,,Parroquia de la Santísima Trinidad,,,
+w668144604,"668144604",way,bank,,,,,,,,,,,,,,,,,,,,,,,Crédito Familiar,yes,,
+w668144607,"668144607",way,parking,,,,,,,,,,,,,,,asphalt,surface,no,customers,,,,,,,,
+w668144611,"668144611",way,parking,,,,,,,,,,,,,Sistema Transporte Colectivo Metro,fence,paved,surface,no,private,,,,,Estacionamiento de conductores Metro L9,,,
+w668144748,"668144748",way,toilets,,,,,,,,,,,bucket,yes,,,,,,yes,,,,,Baños Públicos,yes,,
+w669996064,"669996064",way,marketplace,,,,,,,,,,,,,,,,,,,,,,,,yes,,
+w787653021,"787653021",way,bank,,,Banco Azteca,Aztec Bank,en:Banco Azteca,Q4854076,Banco Azteca,Aztec Bank,Banco Azteca,yes,,,,,,,,,,,,,Banco Azteca,service,Calle José Martí,
+w844395094,"844395094",way,fuel,,"1",,,en:Pemex,Q871308,,,Pemex,,,,,,,,,,,,,,Pemex,roof,Periférico Boulevard Adolfo López Mateos,
+w873342506,"873342506",way,parking,,,,,,,,,,,,,,,,,,,,,,,,,,
+w1250930942,"1250930942",way,shelter,public_transport,"-1",,,,,,,,,,,,,,,,,,,,,,yes,,
+w1250930948,"1250930948",way,toilets,,,,,,,,,,,,,,,,,,yes,,,,,,yes,,
+w1298636104,"1298636104",way,toilets,,,,,,,,,,,,,,,,,,,,,,,,yes,,
+w1298636105,"1298636105",way,school,,,,,,,,,,,,,,,,,,,,,,,Christel House de México A.C.,,,

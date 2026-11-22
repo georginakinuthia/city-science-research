@@ -19,10 +19,20 @@
  * rationale and the per-tick cost budget.
  */
 
-import { ORCA } from '../config'
+import { booleanPointInPolygon } from '@turf/turf'
+
+import { GEOMETRY, MAX_AGENTS, ORCA, TACUBAYA_CROWD } from '../config'
 import { SpatialHashGrid } from '../models/orca'
-import type { ScenarioContainer } from '../stores/scenarios'
-import type { NodeState } from '../stores/geo'
+import {
+  computeEdgePenalties,
+  computeNodeDistanceField,
+  type CrowdAnchors,
+  DemographicProfile,
+  type NodeState,
+  type RoutingCosts,
+  type RoutingData,
+} from '../stores/geo'
+import type { ScenarioContainer } from './scenarioGen'
 
 // Pure per-agent functions. Module-scoped params are installed via
 // `setBehaviorParams` in the Pinia adapter (main thread) or by the worker.
@@ -60,6 +70,14 @@ export const ENGAGEMENT_WAITING = 2
  */
 export type SpawnSpec = SerializedSpawnSpec
 export type SpawnNode = SerializedSpawnNode
+
+type ProjectedNode = NodeState & { worldX: number; worldY: number }
+
+interface InitialCrowd {
+  entries: Map<string, ProjectedNode>
+  targets: ProjectedNode[]
+  positions: Array<{ x: number; y: number; cell: number }>
+}
 
 /** Out-parameter written by `advanceAgent` — one reusable instance per sim. */
 export interface AdvanceResult {
@@ -109,6 +127,7 @@ export class Simulation {
   readonly width: number            // cells E–W
   readonly height: number           // cells N–S
   readonly cellCount: number        // = width * height
+  readonly metersPerCell: number
   readonly bbox: readonly [number, number, number, number]  // [minLon, minLat, maxLon, maxLat]
 
   /** Linear bbox → grid scale factors, computed once. */
@@ -155,6 +174,12 @@ export class Simulation {
    * the MNL inner loop hot path.
    */
   readonly nodeDistanceFields: Float32Array[] = []
+  routingCosts?: RoutingCosts
+  private initialCrowd?: InitialCrowd
+  private readonly femaleDistanceFields: Float32Array[] = []
+  private readonly childDistanceFields: Float32Array[] = []
+  private readonly stepFreeDistanceFields: Float32Array[] = []
+  private readonly edgePenalties = new WeakMap<Uint8Array, Float32Array>()
 
   /**
    * Pre-baked cell color buffer — populated by `bakeCellColors()` after
@@ -185,6 +210,7 @@ export class Simulation {
 
   pedSpeed!: Float32Array
   pedCurrentSpeed!: Float32Array
+  pedProfile!: Uint8Array
 
   pedShopProb!: Float32Array
   pedWaitProb!: Float32Array
@@ -266,6 +292,7 @@ export class Simulation {
     this.width = width
     this.height = height
     this.cellCount = width * height
+    this.metersPerCell = widthMeters / width
     this.bbox = bbox
     this.xScale = width / (maxLon - minLon)
     this.yScale = height / (maxLat - minLat)
@@ -344,6 +371,7 @@ export class Simulation {
    * correctly — `(x + 0.5) | 0` would bug out for x ∈ (-1, 0)).
    */
   cellAt(fx: number, fy: number): number {
+    if (!Number.isFinite(fx) || !Number.isFinite(fy)) return -1
     const ix = Math.round(fx)
     const iy = Math.round(fy)
     if (ix < 0 || ix >= this.width || iy < 0 || iy >= this.height) return -1
@@ -489,6 +517,7 @@ export class Simulation {
     this.pedTargetY            = grow32(this.pedTargetY)
     this.pedSpeed              = grow32(this.pedSpeed)
     this.pedCurrentSpeed       = grow32(this.pedCurrentSpeed)
+    this.pedProfile            = growU8(this.pedProfile)
     this.pedShopProb           = grow32(this.pedShopProb)
     this.pedWaitProb           = grow32(this.pedWaitProb)
     this.pedEngagementMode     = growU8(this.pedEngagementMode)
@@ -518,6 +547,7 @@ export class Simulation {
     const i = this.pedCount++
     this.pedId[i] = this.nextPedId++
     this.pedAlive[i] = 1
+    this.pedProfile[i] = DemographicProfile.standard
     // Reset per-agent fields that don't get overwritten by caller's init
     this.pedMnlHeading[i] = Number.NaN
     this.pedOrcaDeflection[i] = 0
@@ -567,6 +597,7 @@ export class Simulation {
     this.pedTargetY[dst]            = this.pedTargetY[src]!
     this.pedSpeed[dst]              = this.pedSpeed[src]!
     this.pedCurrentSpeed[dst]       = this.pedCurrentSpeed[src]!
+    this.pedProfile[dst]            = this.pedProfile[src]!
     this.pedShopProb[dst]           = this.pedShopProb[src]!
     this.pedWaitProb[dst]           = this.pedWaitProb[src]!
     this.pedEngagementMode[dst]     = this.pedEngagementMode[src]!
@@ -641,8 +672,14 @@ export class Simulation {
    * after `generateScenario()`.
    */
   generateScenario(scenario: ScenarioContainer, sharedNodes: NodeState[]): void {
+    const routing = scenario.routing
     scenario.generatePotentials(this)
-    scenario.generateNodeDistanceFields(this, sharedNodes)
+    scenario.generateNodeDistanceFields(this, routing?.crowd ? [] : sharedNodes, Boolean(routing?.crowd))
+    this.routingCosts = scenario.routingCosts
+    this.nodeDistanceFields.length = 0
+    this.femaleDistanceFields.length = 0
+    this.childDistanceFields.length = 0
+    this.stepFreeDistanceFields.length = 0
 
     if (scenario.surfacesPotentials)   this.surfacePotential.set(scenario.surfacesPotentials)
     if (scenario.stallsPotentials)     this.stallPotential.set(scenario.stallsPotentials)
@@ -662,7 +699,180 @@ export class Simulation {
     // Build the walkable-only neighbor table now that surfacePotential is
     // populated. Hot-path consumers (MNL, gradient seek, following) iterate
     // this instead of checking walkability per-neighbor inside the loop.
+    if (routing?.crowd && this.routingCosts) {
+      for (let cell = 0; cell < this.cellCount; cell++) {
+        if (!this.routingCosts.walkable[cell]) this.surfacePotential[cell] = -1
+        else if (this.surfacePotential[cell]! < 0) this.surfacePotential[cell] = 0
+      }
+    }
     this.buildWalkableNeighborTable()
+    this.initialCrowd = routing?.crowd && this.routingCosts
+      ? this.prepareInitialCrowd(routing.crowd, sharedNodes, this.routingCosts, routing.studyBoundary)
+      : undefined
+    if (this.pedAliveCount === 0) this.seedInitialCrowd()
+  }
+
+  private nearestWalkableCell(x: number, y: number, mask: Uint8Array): number {
+    const here = this.cellAt(x, y)
+    if (mask[here]) return here
+    const radius = TACUBAYA_CROWD.entrySnapMeters / this.metersPerCell
+    let closest = -1
+    let best = radius ** 2
+    for (let row = Math.max(0, Math.ceil(y - radius)); row <= Math.min(this.height - 1, y + radius); row++) {
+      for (let col = Math.max(0, Math.ceil(x - radius)); col <= Math.min(this.width - 1, x + radius); col++) {
+        const cell = this.idx(col, row)
+        if (!mask[cell]) continue
+        const distance = (col - x) ** 2 + (row - y) ** 2
+        if (distance < best) {
+          closest = cell
+          best = distance
+        }
+      }
+    }
+    return closest
+  }
+
+  private prepareInitialCrowd(
+    anchors: CrowdAnchors,
+    nodes: NodeState[],
+    routing: RoutingCosts,
+    studyBoundary: RoutingData['studyBoundary'],
+  ): InitialCrowd {
+    const entries = new Map<string, ProjectedNode>()
+    for (const node of nodes) {
+      if (node.worldX == null || node.worldY == null) continue
+      const accessible = this.nearestWalkableCell(node.worldX, node.worldY, routing.stepFree)
+      const cell = accessible >= 0 ? accessible : this.nearestWalkableCell(node.worldX, node.worldY, routing.walkable)
+      if (cell < 0) continue
+      const worldX = cell % this.width
+      const worldY = Math.floor(cell / this.width)
+      entries.set(node.id, { ...node, worldX, worldY })
+      // The renderer receives the node ID table before any later demand arrives.
+      this.internNodeId(node.id)
+    }
+
+    const nodeList = [...entries.values()]
+    const targetCount = Math.min(TACUBAYA_CROWD.initialTargetLimit, nodeList.length)
+    const targets = Array.from({ length: targetCount }, (_, i) =>
+      nodeList[Math.floor(i * nodeList.length / targetCount)]!,
+    )
+    const fields = targets.map((node) => this.crowdDistanceField(node, routing))
+    const positions: InitialCrowd['positions'] = []
+    for (const [lon, lat] of [...anchors.walkways, ...anchors.destinations, ...(anchors.busStops ?? [])]) {
+      const x = Math.fround(this.lonToX(lon))
+      const y = Math.fround(this.latToY(lat))
+      const cell = this.cellAt(x, y)
+      if (!routing.walkable[cell]) continue
+      if (studyBoundary && !studyBoundary.features.some((area) =>
+        booleanPointInPolygon([this.xToLon(x), this.yToLat(y)], area))) continue
+      if (targets.some((node, i) =>
+        Number.isFinite(fields[i]?.[cell]) &&
+        Math.hypot(node.worldX - x, node.worldY - y) > GEOMETRY.arrivalRadius + 1,
+      )) {
+        positions.push({ x, y, cell })
+      }
+    }
+    return { entries, targets, positions }
+  }
+
+  private crowdDistanceField(node: ProjectedNode, routing: RoutingCosts): Float32Array {
+    const index = this.internNodeId(node.id)
+    return this.nodeDistanceFields[index] ??= computeNodeDistanceField(
+      [node.worldX, node.worldY], this, routing.walkable,
+      { edgePenalties: this.edgePenaltiesFor(routing.walkable) },
+    )
+  }
+
+  private edgePenaltiesFor(walkable: Uint8Array): Float32Array {
+    let penalties = this.edgePenalties.get(walkable)
+    if (!penalties) {
+      penalties = computeEdgePenalties(walkable, this)
+      this.edgePenalties.set(walkable, penalties)
+    }
+    return penalties
+  }
+
+  private seedInitialCrowd(): void {
+    const crowd = this.initialCrowd
+    if (!crowd?.targets.length || !crowd.positions.length) return
+    const { targets, positions } = crowd
+    this.growPedCapacity(MAX_AGENTS)
+
+    let randomState = 0x54414355
+    const random = () => {
+      randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0
+      return randomState / 0x1_0000_0000
+    }
+    const unused = positions.slice()
+    const minTrip = Math.max(GEOMETRY.arrivalRadius + 1, Math.min(
+      TACUBAYA_CROWD.initialTripMeters / this.metersPerCell,
+      Math.hypot(this.width, this.height) / 4,
+    ))
+    for (let attempt = 0; attempt < TACUBAYA_CROWD.initialAgents * 5 &&
+         this.pedAliveCount < TACUBAYA_CROWD.initialAgents; attempt++) {
+      const pool = unused.length ? unused : positions
+      const slot = Math.floor(random() * pool.length)
+      const { x, y, cell } = pool[slot]!
+      if (pool === unused) {
+        pool[slot] = pool[pool.length - 1]!
+        pool.pop()
+      }
+
+      const offset = Math.floor(random() * targets.length)
+      let target: ProjectedNode | undefined
+      for (let n = 0; n < targets.length; n++) {
+        const node = targets[(n + offset) % targets.length]!
+        const distance = Math.hypot(node.worldX - x, node.worldY - y)
+        if (distance <= GEOMETRY.arrivalRadius + 1) continue
+        if (!Number.isFinite(this.nodeDistanceFields[this.nodeIdxFor(node.id)]?.[cell])) continue
+        target ??= node
+        if (distance >= minTrip) {
+          target = node
+          break
+        }
+      }
+      if (!target) continue
+
+      let entry = target
+      let nearest = Infinity
+      for (const node of crowd.entries.values()) {
+        if (node === target) continue
+        const distance = (node.worldX - x) ** 2 + (node.worldY - y) ** 2
+        if (distance < nearest) {
+          nearest = distance
+          entry = node
+        }
+      }
+      if (this.pedCount >= MAX_AGENTS) this.compactDead()
+      const i = this.spawnAgent()
+      pureInitialiseAgent(this, i, entry, target, NaN, NaN, [x, y])
+    }
+    this.compactDead()
+  }
+
+  /** Build one distance field per destination and route preference on first use. */
+  agentDistanceField(i: number): Float32Array | undefined {
+    const node = this.pedTargetNodeIdx[i]!
+    const profile = this.pedProfile[i]!
+    const routing = this.routingCosts
+    if (!routing || profile === DemographicProfile.standard) return this.nodeDistanceFields[node]
+
+    const fields = profile === DemographicProfile.isFemale ? this.femaleDistanceFields
+      : profile === DemographicProfile.hasChild ? this.childDistanceFields : this.stepFreeDistanceFields
+    const cached = fields[node]
+    if (cached) return cached
+
+    const stepFree = fields === this.stepFreeDistanceFields
+    const costs = stepFree ? undefined : fields === this.femaleDistanceFields ? routing.female : routing.child
+    const walkable = stepFree ? routing.stepFree : routing.walkable
+    const field = computeNodeDistanceField(
+      [this.pedTargetX[i]!, this.pedTargetY[i]!],
+      this,
+      walkable,
+      { costs, stepFree, edgePenalties: this.edgePenaltiesFor(walkable) },
+    )
+    fields[node] = field
+    return field
   }
 
   /**
@@ -726,6 +936,8 @@ export class Simulation {
     this.cellHeadingDy.fill(0)
     this.trails.fill(0)
     this.spatialHash.clear()
+    this.pendingSpawns = []
+    this.seedInitialCrowd()
     // NB: cellColorBuffer is scenario-static — not reset here.
   }
 
@@ -796,10 +1008,39 @@ export class Simulation {
     const spawns = this.pendingSpawns
     if (spawns.length === 0) return
     for (let k = 0; k < spawns.length; k++) {
+      if (this.pedAliveCount >= MAX_AGENTS) break
       const spec = spawns[k]!
       if (!spec.destNode) continue
+      const crowd = this.initialCrowd
+      const entry = crowd?.entries.get(spec.startNode.id)
+      const destination = crowd?.entries.get(spec.destNode.id)
+      if (crowd && (!entry || !destination)) continue
+      const routing = this.routingCosts
+      if (entry && destination && routing) {
+        const origin = this.cellAt(entry.worldX, entry.worldY)
+        const distance = this.crowdDistanceField(destination, routing)[origin]
+        if (!Number.isFinite(distance) || distance === 0) continue
+      }
+      const startNode = entry ?? spec.startNode
+      const destNode = destination ?? spec.destNode
+      if (this.pedCount >= MAX_AGENTS) this.compactDead()
       const i = this.spawnAgent()
-      pureInitialiseAgent(this, i, spec.startNode, spec.destNode, spec.shopProb, spec.waitProb)
+      pureInitialiseAgent(this, i, startNode, destNode, spec.shopProb, spec.waitProb)
+
+      if (!crowd || this.pedAliveCount >= TACUBAYA_CROWD.replenishmentThreshold) continue
+      // Increase peak-wave arrivals while occupancy is below target. The
+      // same worker demand still governs which entries are active.
+      const boost = (TACUBAYA_CROWD.replenishmentThreshold - this.pedAliveCount) /
+        TACUBAYA_CROWD.replenishmentBand
+      if (Math.random() < boost) {
+        if (this.pedCount >= MAX_AGENTS) this.compactDead()
+        const extra = this.spawnAgent()
+        const position = [
+          startNode.worldX! + (Math.random() - 0.5) * 0.8,
+          startNode.worldY! + (Math.random() - 0.5) * 0.8,
+        ] as const
+        pureInitialiseAgent(this, extra, startNode, destNode, spec.shopProb, spec.waitProb, position)
+      }
     }
   }
 
