@@ -1,8 +1,13 @@
-# Tacubaya ABM
+# Buen Camino: Tacubaya Pedestrian ABM (CDMX)
+
+[![Launch Live Simulation](https://img.shields.io/badge/▶_Launch_Live_Simulation-GitHub_Pages-2ea44f?style=for-the-badge)](https://georginakinuthia.github.io/city-science-research/)
+
+[![Tacubaya Pedestrian ABM Preview](public/preview.png)](https://georginakinuthia.github.io/city-science-research/)
 
 Agent-based pedestrian microsimulation for the Tacubaya transit hub in Mexico City (CDMX). The model combines multinomial logit (MNL) route choice (Antonini et al. 2006) with ORCA collision avoidance (van den Berg et al. 2011) and Weidmann speed-density relationships to simulate how urban design interventions—sidewalk widening, vendor formalization, shaded canopies, and step-free thresholds—shape pedestrian flow, spatial comfort, and accessibility for vulnerable personas (female commuters, caregivers, elderly, and mobility-impaired pedestrians).
 
-- **Repository**: https://github.com/georginakinuthia/abm-model-tacubaya
+- **Live Simulation**: https://georginakinuthia.github.io/city-science-research/
+- **Repository**: https://github.com/georginakinuthia/city-science-research
 
 ## Getting Started
 
