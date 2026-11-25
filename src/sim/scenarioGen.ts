@@ -13,6 +13,7 @@ import { intBuffer } from '@thi.ng/pixel'
 import type { FeatureCollection, Geometry } from 'geojson'
 
 import {
+  buildPedestrianGrid,
   buildRoutingCosts,
   computeNodeDistanceField,
   computeShortestPath,
@@ -38,15 +39,25 @@ export function potentialsSurface(
   decay: number,
   walkableSurfaceFeat: FeatureCollection<Geometry> | null | undefined,
 ): Float32Array {
-  const numX = grid.width
-  const numY = grid.height
-  const numP = numX * numY
-
-  if (!feats || !Array.isArray(feats.features) || feats.features.length === 0) {
-    return new Float32Array(numP)
-  }
+  if (!Array.isArray(feats?.features) || !feats.features.length) return new Float32Array(grid.width * grid.height)
 
   const featMask = featureMask(feats, grid)
+  const walkMask = feats === walkableSurfaceFeat ? featMask : featureMask(walkableSurfaceFeat, grid)
+  return potentialsFromMasks(featMask, walkMask, grid, decay, false)
+}
+
+function potentialsFromMasks(
+  featMask: Uint8Array,
+  walkMask: Uint8Array,
+  grid: GridLike,
+  decay: number,
+  includeObstacleSources = true,
+): Float32Array {
+  const { width: numX, height: numY } = grid
+  const numP = featMask.length
+  if (includeObstacleSources && !featMask.includes(1)) {
+    return new Float32Array(numP).fill(walkMask === featMask ? -1 : 0)
+  }
 
   // Inside distance-to-boundary (Euclidean on a 0/1 mask).
   const maskInside = new Uint8Array(numP)
@@ -63,8 +74,13 @@ export function potentialsSurface(
 
   // Outside geodesic distance constrained to walkable mask — gradients
   // stop at non-walkable edges instead of leaking around obstacles.
-  const walkMask = feats === walkableSurfaceFeat ? featMask : featureMask(walkableSurfaceFeat, grid)
-  const distOnOutside = walkMask === featMask ? undefined : computeShortestPath(featMask, walkMask, grid)
+  let distOnOutside: Float32Array | undefined
+  if (walkMask !== featMask) {
+    const domain = includeObstacleSources
+      ? walkMask.map((walkable, index) => walkable || featMask[index]!)
+      : walkMask
+    distOnOutside = computeShortestPath(featMask, domain, grid)
+  }
 
   const potentials = new Float32Array(numP)
   for (let i = 0; i < numP; i++) {
@@ -100,6 +116,9 @@ export class ScenarioContainer implements ScenarioData {
   furniture!: FeatureCollection<Geometry>
   routing?: RoutingData
   routingCosts?: RoutingCosts
+  staticObstaclePotentials?: Float32Array
+  private grid?: GridLike
+  private pedestrianGrid?: ReturnType<typeof buildPedestrianGrid>
 
   surfacesPotentials?: Float32Array
   stallsPotentials?: Float32Array
@@ -114,7 +133,27 @@ export class ScenarioContainer implements ScenarioData {
     Object.assign(this, data)
   }
 
+  private getPedestrianGrid(grid: GridLike) {
+    if (grid !== this.grid) {
+      this.grid = grid
+      this.pedestrianGrid = this.routing && buildPedestrianGrid(this.routing, this.structures, this.stalls, grid)
+    }
+    return this.pedestrianGrid
+  }
+
   generatePotentials(grid: GridLike): void {
+    const pedestrian = this.getPedestrianGrid(grid)
+    if (pedestrian) {
+      const walkable = pedestrian.walkable
+      this.surfacesPotentials = potentialsFromMasks(walkable, walkable, grid, DECAY_FACTORS.SURFACE)
+      this.staticObstaclePotentials = potentialsFromMasks(pedestrian.obstacles, walkable, grid, DECAY_FACTORS.FURNITURE)
+      this.stallsPotentials = potentialsFromMasks(pedestrian.stalls, walkable, grid, DECAY_FACTORS.STALLS)
+      this.furniturePotentials = new Float32Array(walkable.length)
+      this.shadePotentials = potentialsFromMasks(featureMask(this.shade, grid), walkable, grid, DECAY_FACTORS.SHADE)
+      return
+    }
+
+    this.staticObstaclePotentials = undefined
     this.surfacesPotentials = potentialsSurface(
       this.surfaces,
       grid,
@@ -141,13 +180,13 @@ export class ScenarioContainer implements ScenarioData {
     )
   }
 
-  generateNodeDistanceFields(grid: GridLike, nodes: NodeState[], includeWalkways = false): void {
+  private legacyWalkabilityMask(grid: GridLike, includeWalkways: boolean): Uint8Array {
     // Walkable = on-surface AND off-stall AND off-furniture.
     const surfacesMask = featureMask(this.surfaces, grid)
     const stallsMask = featureMask(this.stalls, grid)
     const furnitureMask = featureMask(this.furniture, grid)
     const walkwayConnections = includeWalkways && this.routing && walkwayMask(this.routing.walkways, grid)
-    const structuresMask = walkwayConnections && featureMask(this.structures, grid)
+    const structuresMask = walkwayConnections ? featureMask(this.structures, grid) : undefined
     const studyBoundary = this.routing?.studyBoundary
     const studyMask = studyBoundary && featureMask(studyBoundary, grid)
 
@@ -158,9 +197,19 @@ export class ScenarioContainer implements ScenarioData {
       walkabilityMask[i] = onRoute && (!studyMask || studyMask[i]) && !stallsMask[i] && !furnitureMask[i] ? 1 : 0
     }
 
+    return walkabilityMask
+  }
+
+  generateNodeDistanceFields(grid: GridLike, nodes: NodeState[], includeWalkways = false): void {
+    const pedestrian = this.getPedestrianGrid(grid)
+    const walkabilityMask = pedestrian?.walkable ?? this.legacyWalkabilityMask(grid, includeWalkways)
     this.routingCosts = this.routing
       ? buildRoutingCosts(this.routing, grid, walkabilityMask, this.stallsPotentials)
       : undefined
+    if (this.routingCosts && pedestrian) {
+      this.routingCosts.pedestrian = pedestrian
+      this.routingCosts.staticObstaclePotentials = this.staticObstaclePotentials
+    }
 
     this.nodeDistanceFields = new Map()
     for (const node of nodes) {

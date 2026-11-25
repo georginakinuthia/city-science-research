@@ -1,8 +1,10 @@
 // Pure geographic/algorithmic functions extracted from scenarios.ts
 // Separated so they can be tested without triggering Pinia/Vue imports.
 
-import { pointOnFeature } from '@turf/turf'
-import type { Feature, FeatureCollection, Geometry, MultiPolygon, Point, Polygon, Position } from 'geojson'
+import { distance, lineIntersect, pointOnFeature, polygonize } from '@turf/turf'
+import type {
+  Feature, FeatureCollection, Geometry, LineString, MultiPolygon, Point, Polygon, Position,
+} from 'geojson'
 
 import { GEOMETRY, WGS84 } from '../config'
 
@@ -93,6 +95,27 @@ export interface RoutingData {
   walkways: FeatureCollection<Geometry>
   studyBoundary?: FeatureCollection<Polygon | MultiPolygon>
   crowd?: CrowdAnchors
+  pedestrian?: PedestrianLayers
+}
+
+interface PedestrianLayers {
+  streets: FeatureCollection<Geometry>
+  blocks: FeatureCollection<Polygon | MultiPolygon>
+  buses: FeatureCollection<Geometry>
+  metro: FeatureCollection<Point>
+  busStops: FeatureCollection<Point>
+  crime: FeatureCollection<Geometry>
+  economicActivity: FeatureCollection<Geometry>
+}
+
+export interface PedestrianGrid {
+  walkable: Uint8Array
+  obstacles: Uint8Array
+  stalls: Uint8Array
+  // Cell index to feature indices in the scenario layer.
+  crime: ReadonlyMap<number, readonly number[]>
+  economicActivity: ReadonlyMap<number, readonly number[]>
+  transportTypes: ReadonlyMap<number, readonly number[]>
 }
 
 export enum DemographicProfile {
@@ -112,6 +135,8 @@ export interface RoutingCosts {
   stepFree: Uint8Array
   female: Float32Array
   child: Float32Array
+  pedestrian?: PedestrianGrid
+  staticObstaclePotentials?: Float32Array
 }
 
 // Constants for potential field decay rates (in meters)
@@ -277,6 +302,113 @@ function rasterizeRoute(
     case 'GeometryCollection':
       for (const part of geometry.geometries) rasterizeRoute(part, grid, radius, mark)
       break
+  }
+}
+
+function lineParts({ features }: FeatureCollection<Geometry>): Feature<LineString>[] {
+  return features.flatMap((feature): Feature<LineString>[] => {
+    const geometry = feature?.geometry
+    if (geometry?.type === 'LineString') return [{ ...feature, geometry }]
+    if (geometry?.type !== 'MultiLineString') return []
+    return geometry.coordinates.map((coordinates) => ({
+      ...feature,
+      geometry: { type: 'LineString', coordinates },
+    }))
+  })
+}
+
+export function polygonizeBlocks(data: FeatureCollection<Geometry>): PedestrianLayers['blocks'] {
+  const polygons = data.features.filter(
+    (feature): feature is Feature<Polygon | MultiPolygon> =>
+      feature.geometry?.type === 'Polygon' || feature.geometry?.type === 'MultiPolygon',
+  )
+  const edges = new Map<string, Feature<LineString>>()
+  for (const { geometry } of lineParts(data)) {
+    const positions = geometry.coordinates
+    const first = positions[0]
+    const last = positions[positions.length - 1]
+    // Close small digitizing gaps without drawing edges across open outlines.
+    const ring = positions.length >= 3 && first && last && distance(first, last, { units: 'meters' }) <= 2
+      ? [...positions, first]
+      : positions
+    for (let i = 1; i < ring.length; i++) {
+      const start = ring[i - 1]!.slice(0, 2)
+      const end = ring[i]!.slice(0, 2)
+      const a = start.join(',')
+      const b = end.join(',')
+      if (a === b) continue
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`
+      edges.set(key, {
+        type: 'Feature',
+        properties: null,
+        geometry: { type: 'LineString', coordinates: [start, end] },
+      })
+    }
+  }
+  const closed = polygonize({ type: 'FeatureCollection', features: [...edges.values()] })
+  return { type: 'FeatureCollection', features: [...polygons, ...closed.features] }
+}
+
+function spatialLookup(data: FeatureCollection<Geometry>, grid: GridLike) {
+  const cells = new Map<number, number[]>()
+  data.features.forEach(({ geometry }, featureIndex) => {
+    if (!geometry) return
+    rasterizeRoute(geometry, grid, Math.SQRT1_2, (cell) => {
+      const features = cells.get(cell)
+      if (!features) cells.set(cell, [featureIndex])
+      else if (features[features.length - 1] !== featureIndex) features.push(featureIndex)
+    })
+  })
+  return cells
+}
+
+export function buildPedestrianGrid(
+  data: RoutingData,
+  structures: FeatureCollection<Geometry>,
+  stalls: FeatureCollection<Geometry>,
+  grid: GridLike,
+): PedestrianGrid | undefined {
+  const layers = data.pedestrian
+  if (!layers || !data.studyBoundary) return
+  const walkable = featureMask(data.studyBoundary, grid)
+  const blocks = featureMask(layers.blocks, grid)
+  const obstacles = featureMask(structures, grid)
+  const busMask = featureMask(layers.buses, grid)
+  const stallMask = featureMask(stalls, grid)
+  const roads = new Uint8Array(walkable.length)
+  const crossings = new Uint8Array(walkable.length)
+  const scale = grid.metersPerCell ?? 1
+  const streets = lineParts(layers.streets)
+
+  for (const { geometry } of streets) {
+    rasterizeRoute(geometry, grid, 3 / scale, (index) => { roads[index] = 1 })
+  }
+  // Crossing disks reopen only road cells. Footprints and blocks stay closed.
+  const markCrossing = (geometry: Point, radius: number) => {
+    rasterizeRoute(geometry, grid, radius / scale, (index) => { crossings[index] = 1 })
+  }
+  for (let a = 0; a < streets.length; a++) {
+    for (let b = a + 1; b < streets.length; b++) {
+      for (const { geometry } of lineIntersect(streets[a]!, streets[b]!).features) {
+        markCrossing(geometry, 6)
+      }
+    }
+  }
+  for (const { geometry } of [...layers.metro.features, ...layers.busStops.features]) {
+    markCrossing(geometry, 8)
+  }
+  for (let cell = 0; cell < walkable.length; cell++) {
+    obstacles[cell] = obstacles[cell]! | busMask[cell]! | stallMask[cell]!
+    if (blocks[cell] || obstacles[cell] || (roads[cell] && !crossings[cell])) walkable[cell] = 0
+  }
+
+  return {
+    walkable,
+    obstacles,
+    stalls: stallMask,
+    crime: spatialLookup(layers.crime, grid),
+    economicActivity: spatialLookup(layers.economicActivity, grid),
+    transportTypes: spatialLookup(data.transport, grid),
   }
 }
 

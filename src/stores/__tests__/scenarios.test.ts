@@ -1,12 +1,17 @@
+import { featureCollection, lineString, multiLineString, point, polygon } from '@turf/turf'
 import type { FeatureCollection, Geometry } from 'geojson'
 import { describe, expect, it } from 'vitest'
 
+import { ScenarioContainer } from '../../sim/scenarioGen'
+
 import {
   buildNodesFromCollection,
+  buildPedestrianGrid,
   computeNodeDistanceField,
   computeShortestPath,
   featureMask,
   MinHeap,
+  polygonizeBlocks,
   walkwayMask,
 } from '../geo'
 
@@ -456,5 +461,72 @@ describe('computeNodeDistanceField', () => {
 
     const distances = computeNodeDistanceField([2, 2], world, walkMask)
     expect(distances.every((d: number) => d === Infinity)).toBe(true)
+  })
+})
+
+describe('pedestrian grid', () => {
+  it('polygonizes multiline block outlines and preserves street crossings without unblocking obstacles', () => {
+    const grid = createMockGrid(40, 40)
+    const square = (x: number, y: number) =>
+      polygon([[[x, y], [x + 2, y], [x + 2, y + 2], [x, y + 2], [x, y]]])
+    const boundary = polygon([[[1, 1], [38, 1], [38, 38], [1, 38], [1, 1]]])
+    const streets = featureCollection([
+      lineString([[2, 20], [37, 20]]),
+      lineString([[20, 2], [20, 37]]),
+    ])
+    const blocks = polygonizeBlocks(featureCollection([
+      multiLineString([
+        [[4, 4], [8, 4], [8, 8]],
+        [[8, 8], [4, 8], [4, 4]],
+      ]),
+    ]))
+    expect(blocks.features).toHaveLength(1)
+
+    const routing = {
+      transport: streets,
+      walkways: featureCollection([]),
+      studyBoundary: featureCollection([boundary]),
+      pedestrian: {
+        streets,
+        blocks,
+        buses: featureCollection([square(19, 21)]),
+        metro: featureCollection([point([7, 20])]),
+        busStops: featureCollection([point([32, 20])]),
+        crime: featureCollection([point([12, 5]), point([12, 5])]),
+        economicActivity: featureCollection([point([12, 6])]),
+      },
+    }
+    const structures = featureCollection([square(9, 9), square(12, 9)])
+    const stalls = featureCollection([square(9, 12)])
+    const data = buildPedestrianGrid(routing, structures, stalls, grid)!
+    const cell = (x: number, y: number) => y * grid.width + x
+
+    expect(data.walkable[cell(0, 6)]).toBe(0)
+    expect(data.walkable[cell(5, 5)]).toBe(0)
+    expect(data.walkable[cell(11, 15)]).toBe(1)
+    expect(data.walkable[cell(20, 10)]).toBe(0)
+    expect(data.walkable[cell(20, 20)]).toBe(1)
+    expect(data.walkable[cell(20, 22)]).toBe(0)
+    expect(data.obstacles[cell(20, 22)]).toBe(1)
+    expect(data.obstacles[cell(10, 10)]).toBe(1)
+    expect(data.obstacles[cell(13, 10)]).toBe(1)
+    expect(data.obstacles[cell(10, 13)]).toBe(1)
+    expect(data.stalls[cell(10, 13)]).toBe(1)
+    expect(data.crime.get(cell(12, 5))).toEqual([0, 1])
+    expect(data.economicActivity.get(cell(12, 6))).toEqual([0])
+    expect(data.transportTypes.get(cell(20, 20))).toEqual([0, 1])
+
+    const empty = featureCollection([])
+    const scenario = new ScenarioContainer({
+      surfaces: empty, shade: empty, furniture: empty, stalls, structures, routing,
+    })
+    scenario.generatePotentials(grid)
+    scenario.generateNodeDistanceFields(grid, [])
+    expect(scenario.surfacesPotentials?.[cell(20, 22)]).toBe(-1)
+    expect(scenario.routingCosts?.staticObstaclePotentials?.[cell(20, 22)]).toBeGreaterThan(0)
+    expect(scenario.stallsPotentials?.[cell(10, 13)]).toBeGreaterThan(0)
+
+    const distances = computeNodeDistanceField([7, 20], grid, data.walkable)
+    expect(distances[cell(32, 20)]).toBeLessThan(Infinity)
   })
 })

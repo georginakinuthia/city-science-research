@@ -19,6 +19,7 @@ import {
   computeNodeDistanceField,
   computeShortestPath,
   featureMask,
+  polygonizeBlocks,
   type GridLike,
   toMarkerPoints,
 } from './geo'
@@ -141,23 +142,28 @@ function coordinates(points: Feature<Point>[]): LonLat[] {
   return points.map(({ geometry }) => [geometry.coordinates[0]!, geometry.coordinates[1]!])
 }
 
-class MissingGeoJSONError extends Error {}
+class MissingScenarioFileError extends Error {}
 
-export async function fetchGeoJSON(filename: string): Promise<FeatureCollection<Geometry>> {
+async function fetchLayerText(filename: string, accept: string): Promise<string> {
   const root = new URL(import.meta.env.BASE_URL, window.location.origin)
   const url = new URL(filename.replace(/^\//, ''), root)
-  const response = await fetch(url, {
-    headers: { Accept: 'application/geo+json, application/json' },
-  })
+  const response = await fetch(url, { headers: { Accept: accept } })
 
   if (response.status === 404 || response.headers.get('content-type')?.includes('text/html')) {
-    throw new MissingGeoJSONError(`GeoJSON file not found: ${filename}`)
+    throw new MissingScenarioFileError(`Scenario file not found: ${filename}`)
   }
   if (!response.ok) {
     throw new Error(`Failed to fetch ${filename}: ${response.status} ${response.statusText}`)
   }
 
-  const data = (await response.json()) as FeatureCollection<Geometry>
+  const text = await response.text()
+  if (!text.trim()) throw new MissingScenarioFileError(`Empty scenario file: ${filename}`)
+  return text
+}
+
+export async function fetchGeoJSON(filename: string): Promise<FeatureCollection<Geometry>> {
+  const text = await fetchLayerText(filename, 'application/geo+json, application/json')
+  const data = JSON.parse(text) as FeatureCollection<Geometry>
 
   if (!data || data.type !== 'FeatureCollection' || !Array.isArray(data.features)) {
     throw new Error(`Invalid GeoJSON format in ${filename}`)
@@ -166,42 +172,53 @@ export async function fetchGeoJSON(filename: string): Promise<FeatureCollection<
   return data
 }
 
-async function fetchScenarioLayer(
+async function fetchScenarioLayer<T>(
   scenarioPath: string,
   filename: string,
-  load: typeof fetchGeoJSON,
-  legacyFilename?: string,
-): Promise<FeatureCollection<Geometry>> {
-  const loadFolder = async (folder: string) => {
-    try {
-      return await load(`/${folder}/${filename}`)
-    } catch (error) {
-      if (!(error instanceof MissingGeoJSONError) || !legacyFilename) throw error
-      return load(`/${folder}/${legacyFilename}`)
-    }
-  }
+  load: (filename: string) => Promise<T>,
+  isEmpty: (data: T) => boolean,
+): Promise<T> {
+  const request = load(`/${scenarioPath}/${filename}`)
+  if (scenarioPath !== 'scenarioB') return request
   try {
-    return await loadFolder(scenarioPath)
+    const data = await request
+    if (!isEmpty(data)) return data
   } catch (error) {
-    if (!(error instanceof MissingGeoJSONError) || scenarioPath !== 'scenarioB') throw error
-    return loadFolder('scenarioA')
+    if (!(error instanceof MissingScenarioFileError)) throw error
   }
+  return load(`/scenarioA/${filename}`)
 }
+
+const emptyCollection = (): FeatureCollection<Geometry> =>
+  ({ type: 'FeatureCollection', features: [] })
+
+const hasNoGeometry = (data: FeatureCollection<Geometry>) =>
+  !data.features.some((feature) =>
+    feature?.geometry && bbox(feature, { recompute: true }).every(Number.isFinite),
+  )
 
 export function fetchScenarioGeoJSON(scenarioPath: string, filename: string) {
-  return fetchScenarioLayer(scenarioPath, filename, fetchGeoJSON)
+  return fetchScenarioLayer(scenarioPath, filename, fetchGeoJSON, hasNoGeometry)
 }
 
-async function optionalGeoJSON(
-  filename: string,
-  request: Promise<FeatureCollection<Geometry>>,
-): Promise<FeatureCollection<Geometry>> {
-  try {
-    return await request
-  } catch (error) {
-    console.warn(`Could not load ${filename}`, error)
-    return { type: 'FeatureCollection', features: [] }
+type TransportRow = Record<string, string>
+
+async function fetchTransportRows(filename: string): Promise<TransportRow[]> {
+  const csv = await fetchLayerText(filename, 'text/csv')
+  const tokens = csv.replace(/^\uFEFF/, '').match(/"(?:[^"]|"")*"|[^",\r\n]+|,|\r\n|\r|\n/g) ?? []
+  const rows: string[][] = [['']]
+  for (const token of tokens) {
+    const row = rows[rows.length - 1]!
+    if (token === ',') row.push('')
+    else if (token.startsWith('\r') || token.startsWith('\n')) rows.push([''])
+    else row[row.length - 1] = token.startsWith('"') ? token.slice(1, -1).replace(/""/g, '"') : token
   }
+  const [header = [], ...data] = rows
+  const idColumn = header.indexOf('id')
+  if (idColumn === -1) throw new Error(`Missing id column in ${filename}`)
+  return data.filter((row) => row[idColumn]?.trim()).map((row) =>
+    Object.fromEntries(header.map((key, index) => [key, row[index] ?? ''])),
+  )
 }
 
 function bufferPointsByDia(fc: FeatureCollection<Geometry> | null): FeatureCollection<Geometry> {
@@ -235,60 +252,86 @@ function bufferPointsByDia(fc: FeatureCollection<Geometry> | null): FeatureColle
 export async function loadScenario(
   scenarioPath: string,
   load = fetchGeoJSON,
+  loadTransport = fetchTransportRows,
 ): Promise<ScenarioData> {
-  const layer = (filename: string, legacyFilename?: string) =>
-    fetchScenarioLayer(scenarioPath, filename, load, legacyFilename)
-  const [furniture, stalls, structures, surfaces, shade] = await Promise.all([
-    layer('furniture.geojson'),
-    layer('stalls.geojson'),
-    layer('structures.geojson'),
-    layer('surfaces.geojson'),
-    layer('shade.geojson', 'trees.geojson'),
+  const layer = (filename: string) => fetchScenarioLayer(scenarioPath, filename, load, hasNoGeometry)
+  const [
+    mainBuildings, extraBuildings, streets, buses, stalls, trees, blocks,
+    crime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary,
+  ] = await Promise.all([
+    layer('main_buildings.geojson'),
+    layer('extra_buildings.geojson'),
+    layer('streets.geojson'),
+    layer('buses.geojson'),
+    layer('tacubaya_stalls.geojson'),
+    layer('trees.geojson'),
+    layer('blocks.geojson'),
+    layer('crime.geojson'),
+    layer('economic_activity2.geojson'),
+    layer('transport_types.geojson'),
+    fetchScenarioLayer(scenarioPath, 'transport_types.csv', loadTransport, (rows) => rows.length === 0),
+    layer('metro_stations.geojson'),
+    layer('bus_stops.geojson'),
+    layer('study_boundary.geojson'),
   ])
 
+  const transportById = new Map(transportRows.map((row) => [row.id, row]))
+  const transport: FeatureCollection<Geometry> = {
+    ...transportGeometry,
+    features: transportGeometry.features.map((feature) => ({
+      ...feature,
+      properties: {
+        ...transportById.get(String(feature.properties?.id ?? feature.id)),
+        ...feature.properties,
+      },
+    })),
+  }
+  const structures: FeatureCollection<Geometry> = {
+    type: 'FeatureCollection',
+    features: [...mainBuildings.features, ...extraBuildings.features],
+  }
+  const area = studyArea(boundary, streets)
+  const walkwayPoints = uniquePoints(walkwayAnchors(streets, area), 0.000008)
+  const busPoints = uniquePoints(pointsInArea(busStops, area), 0.000015)
+  const crowd: CrowdAnchors = {
+    walkways: coordinates(walkwayPoints),
+    destinations: coordinates(uniquePoints(pointsInArea(economicActivity, area), 0.00015)),
+    busStops: coordinates(busPoints),
+  }
+
   return {
-    furniture,
+    furniture: emptyCollection(),
     stalls,
     structures,
-    surfaces,
-    shade,
+    surfaces: emptyCollection(),
+    shade: trees,
+    routing: {
+      transport,
+      walkways: emptyCollection(),
+      studyBoundary: area.studyBoundary,
+      crowd,
+      pedestrian: {
+        streets,
+        blocks: polygonizeBlocks(blocks),
+        buses,
+        metro: { type: 'FeatureCollection', features: pointsInArea(metro, area) },
+        busStops: { type: 'FeatureCollection', features: busPoints },
+        crime,
+        economicActivity,
+      },
+    },
   }
 }
 
-async function loadScenarioInputs(scenarioPath: string, load: typeof fetchGeoJSON) {
-  const layer = (filename: string) => fetchScenarioLayer(scenarioPath, filename, load)
-  const optionalLayer = (filename: string) =>
-    optionalGeoJSON(`/${scenarioPath}/${filename}`, layer(filename))
-  const [data, transport, walkways, metro, buses, destinations, boundary] = await Promise.all([
-    loadScenario(scenarioPath, load),
-    optionalLayer('transport_types.geojson'),
-    optionalLayer('walkway2.geojson'),
-    optionalGeoJSON(
-      `/${scenarioPath}/metro_stations.geojson`,
-      layer('metro_stations.geojson').catch((error) => {
-        if (!(error instanceof MissingGeoJSONError)) throw error
-        return load('/nodes.geojson')
-      }),
-    ),
-    optionalLayer('bus_stops.geojson'),
-    optionalLayer('destinations.geojson'),
-    optionalLayer('study_boundary.geojson'),
-  ])
-
-  const area = studyArea(boundary, data.surfaces)
-  const walkwayPoints = uniquePoints(walkwayAnchors(walkways, area), 0.000008)
-  const busPoints = uniquePoints(pointsInArea(buses, area), 0.000015)
-  const crowd: CrowdAnchors = {
-    walkways: coordinates(walkwayPoints),
-    destinations: coordinates(uniquePoints(pointsInArea(destinations, area), 0.00015)),
-    busStops: coordinates(busPoints),
-  }
-  const routing = { transport, walkways, studyBoundary: area.studyBoundary, crowd }
-  return {
-    scenario: markRaw(new ScenarioContainer({ ...data, routing }, scenarioPath)),
-    walkwayPoints,
-    busPoints,
-    metroPoints: pointsInArea(metro, area),
+function deduplicateRequests<T>(load: (filename: string) => Promise<T>) {
+  const requests = new Map<string, Promise<T>>()
+  return (filename: string) => {
+    let request = requests.get(filename)
+    if (!request) {
+      request = load(filename)
+      requests.set(filename, request)
+    }
+    return request
   }
 }
 
@@ -306,38 +349,40 @@ export const useScenariosStore = defineStore('scenarios', () => {
 
   function loadScenarios(): Promise<void> {
     if (pendingLoad) return pendingLoad
-    const requests = new Map<string, ReturnType<typeof fetchGeoJSON>>()
-    const load = (filename: string) => {
-      let request = requests.get(filename)
-      if (!request) {
-        request = fetchGeoJSON(filename)
-        requests.set(filename, request)
-      }
-      return request
-    }
-    pendingLoad = Promise.all([
-      loadScenarioInputs('scenarioA', load),
-      loadScenarioInputs('scenarioB', load),
-    ])
+    const load = deduplicateRequests(fetchGeoJSON)
+    const loadTransport = deduplicateRequests(fetchTransportRows)
+    const loadContainer = async (folder: string) =>
+      markRaw(new ScenarioContainer(await loadScenario(folder, load, loadTransport), folder))
+    pendingLoad = Promise.all([loadContainer('scenarioA'), loadContainer('scenarioB')])
       .then(([a, b]) => {
+        const scenarios = [a, b]
+        const transitPoints = (key: 'metro' | 'busStops') =>
+          scenarios.flatMap((scenario) => scenario.routing?.pedestrian?.[key].features ?? [])
+        const walkwayPoints = scenarios.flatMap((scenario) =>
+          (scenario.routing?.crowd?.walkways ?? []).map((coordinates): Feature<Point> => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates },
+            properties: null,
+          })),
+        )
         const groups = [
           {
             id: 'metro',
             label: 'Metro exit',
             share: 0.55,
-            points: uniquePoints([...a.metroPoints, ...b.metroPoints], 0.000015),
+            points: uniquePoints(transitPoints('metro'), 0.000015),
           },
           {
             id: 'bus',
             label: 'Bus stop',
             share: 0.3,
-            points: uniquePoints([...a.busPoints, ...b.busPoints], 0.000015),
+            points: uniquePoints(transitPoints('busStops'), 0.000015),
           },
           {
             id: 'peripheral',
             label: 'Peripheral entry',
             share: 0.15,
-            points: peripheralPoints([...a.walkwayPoints, ...b.walkwayPoints]),
+            points: peripheralPoints(walkwayPoints),
           },
         ].filter(({ points }) => points.length > 0)
         const totalShare = groups.reduce((total, group) => total + group.share, 0)
@@ -362,8 +407,8 @@ export const useScenariosStore = defineStore('scenarios', () => {
 
         sharedNodes.value = nodes
         nodesBuffered.value = buffered
-        scenarioA.value = a.scenario
-        scenarioB.value = b.scenario
+        scenarioA.value = a
+        scenarioB.value = b
       })
       .catch((err) => {
         const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred'
