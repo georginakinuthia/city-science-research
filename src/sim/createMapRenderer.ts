@@ -1,4 +1,5 @@
-import type { Feature, FeatureCollection, Geometry, Polygon, Position } from 'geojson'
+import { bbox, difference, featureCollection, transformScale } from '@turf/turf'
+import type { Feature, FeatureCollection, Geometry, MultiPolygon, Polygon, Position } from 'geojson'
 import type { ExpressionSpecification, FillExtrusionLayerSpecification, FilterSpecification, GeoJSONSource, LayerSpecification, Map as MapLibreMap, StyleSpecification } from 'maplibre-gl'
 
 import { ACCENT, DARKEST, LIGHT } from '../assets/palette'
@@ -101,23 +102,14 @@ function combine(inputs: (Collection | undefined)[]): Collection {
   })))
 }
 
-function busMarkerSquares(data: Collection): FeatureCollection<Polygon> {
-  const metersPerDegree = 111_320
-  const halfSide = 1.1 / metersPerDegree
-  return {
-    type: 'FeatureCollection',
-    features: toMarkerPoints(data).features.map(({ geometry: { coordinates: [lng, lat] }, properties }) => {
-      const x = lng!, y = lat!
-      const halfWidth = halfSide / Math.cos(y * Math.PI / 180)
-      const west = x - halfWidth, east = x + halfWidth
-      const south = y - halfSide, north = y + halfSide
-      return {
-        type: 'Feature', properties,
-        geometry: { type: 'Polygon', coordinates: [[[west, south], [east, south],
-          [east, north], [west, north], [west, south]]] },
-      }
-    }),
-  }
+function isPolygon(feature: Feature<Geometry>): feature is Feature<Polygon | MultiPolygon> {
+  return feature.geometry?.type === 'Polygon' || feature.geometry?.type === 'MultiPolygon'
+}
+
+function scaleBusFootprints(data: Collection | undefined): Collection {
+  return collection((data?.features ?? [])
+    .filter(isPolygon)
+    .map((feature) => transformScale(feature, 2 / 3)))
 }
 
 function closedFootprint(ring: Position[]): boolean {
@@ -165,7 +157,7 @@ export async function loadTacubayaMapAssets(): Promise<readonly [MapAsset[], Map
       names.map((name) => fetchOptionalMapLayer([[folder, `${name}.geojson`]]))),
   ))
   const [buildingsA, buildingsB, perimeter, stallData, proposedStalls, paths, treeData, surfaces, shade, furniture,
-    lights, metro, buses, activity] = await Promise.all([
+    lights, metro, buses, newBuses, activity] = await Promise.all([
     fetchOptionalMapLayer([['scenarioA', TACUBAYA_BUILDING_FILE]]),
     fetchOptionalMapLayer([['scenarioB', TACUBAYA_BUILDING_FILE]]),
     merge('study_boundary', 'boundary'),
@@ -178,7 +170,8 @@ export async function loadTacubayaMapAssets(): Promise<readonly [MapAsset[], Map
     fetchOptionalMapLayer([['scenarioB', 'furniture.geojson']]),
     merge('street_lights'),
     merge('metro_stations'),
-    merge('buses', 'bus_stops'),
+    fetchOptionalMapLayer([['scenarioA', 'buses.geojson']]),
+    fetchOptionalMapLayer([['scenarioB', 'new_buses.geojson']], undefined, { checkManifest: false }),
     merge('economic_activity2'),
   ])
 
@@ -257,7 +250,7 @@ export async function loadTacubayaMapAssets(): Promise<readonly [MapAsset[], Map
       paint: { 'circle-color': '#334155', 'circle-radius': 2.5, 'circle-opacity': 0.55,
         'circle-stroke-color': '#64748b', 'circle-stroke-width': 1, 'circle-stroke-opacity': 0.55 },
     }] },
-    { id: 'bus-markers', data: busMarkerSquares(buses), layers: [{
+    { id: 'bus-markers', data: scaleBusFootprints(buses), layers: [{
       id: 'bus-markers', type: 'fill', source: 'src-bus-markers', filter: polygonFilter,
       paint: { 'fill-color': busLegend.color, 'fill-opacity': 0.60 },
     }] },
@@ -279,33 +272,55 @@ export async function loadTacubayaMapAssets(): Promise<readonly [MapAsset[], Map
       paint: { 'circle-color': ACCENT, 'circle-radius': 1.8, 'circle-opacity': 0.5 },
     }] },
   ]
-  const withBuildings = (buildings: Collection | undefined, proposed: boolean): MapAsset[] => [
-    ...(proposed ? ground : []),
-    { id: 'buildings', data: collection(
+  const withBuildings = (buildings: Collection | undefined, proposed: boolean): MapAsset[] => {
+    const footprints = collection(
       (buildings?.features ?? []).flatMap((feature) => {
         const id = feature.id ?? feature.properties?.fid
         if (!TACUBAYA_MARKET_PART_IDS.has(id)) return normalizeBuilding(feature)
         return id === tacubayaMarket.id ? normalizeBuilding(tacubayaMarket) : []
       }),
-    ), layers: [{
-      id: 'buildings-extrusion', type: 'fill-extrusion', source: 'src-buildings',
-      filter: polygonFilter, paint: buildingPaint,
-    }] },
-    ...overlays.filter((asset) => proposed || asset.id !== 'furniture').map((asset): MapAsset => {
-      if (proposed && asset.id === trees.id && treeCanopies.features.length) {
-        return { ...asset, data: combine([asset.data, toMarkerPoints(treeCanopies)]) }
-      }
-      if (!proposed || asset.id !== stalls.id || !proposedStalls) return asset
-      return { ...asset, data: proposedStalls, layers: [
-        { id: 'stalls-extrusion', type: 'fill-extrusion', source: 'src-stalls', filter: polygonFilter,
-          paint: { ...buildingPaint, 'fill-extrusion-height': 3.1 } },
-        { id: 'stalls', type: 'line', source: 'src-stalls', filter: ['any', polygonFilter, lineFilter],
-          paint: { 'line-color': '#737985', 'line-width': 0.85, 'line-opacity': 0.52 } },
-        { id: 'stalls-points', type: 'circle', source: 'src-stalls', filter: pointFilter,
-          paint: { 'circle-color': BUILDING_COLOR, 'circle-radius': 1.5, 'circle-opacity': 0.55 } },
-      ] }
-    }),
-  ]
+    )
+    const buildingBounds = footprints.features
+      .filter(isPolygon)
+      .map((feature) => ({ feature, bounds: bbox(feature) }))
+    return [
+      ...(proposed ? ground : []),
+      ...overlays.filter(({ id }) => id === 'bus-markers').map((asset): MapAsset => {
+        const markers = proposed && newBuses ? scaleBusFootprints(newBuses).features : asset.data.features
+        const count = proposed && !newBuses ? Math.round(markers.length * 2 / 3) : markers.length
+        const selected = Array.from({ length: count }, (_, index) =>
+          markers[Math.floor((index + 0.5) * markers.length / count)]!,
+        )
+        return { ...asset, data: collection(selected.filter(isPolygon).flatMap((marker) => {
+          const [west, south, east, north] = bbox(marker)
+          const overlaps = buildingBounds.filter(({ bounds: [x0, y0, x1, y1] }) =>
+            west! < x1! && east! > x0! && south! < y1! && north! > y0!,
+          )
+          if (!overlaps.length) return [marker]
+          const visible = difference(featureCollection([marker, ...overlaps.map(({ feature }) => feature)]))
+          return visible ? [{ ...marker, geometry: visible.geometry }] : []
+        })) }
+      }),
+      { id: 'buildings', data: footprints, layers: [{
+        id: 'buildings-extrusion', type: 'fill-extrusion', source: 'src-buildings',
+        filter: polygonFilter, paint: buildingPaint,
+      }] },
+      ...overlays.filter((asset) => asset.id !== 'bus-markers' && (proposed || asset.id !== 'furniture')).map((asset): MapAsset => {
+        if (proposed && asset.id === trees.id && treeCanopies.features.length) {
+          return { ...asset, data: combine([asset.data, toMarkerPoints(treeCanopies)]) }
+        }
+        if (!proposed || asset.id !== stalls.id || !proposedStalls) return asset
+        return { ...asset, data: proposedStalls, layers: [
+          { id: 'stalls-extrusion', type: 'fill-extrusion', source: 'src-stalls', filter: polygonFilter,
+            paint: { ...buildingPaint, 'fill-extrusion-height': 3.1 } },
+          { id: 'stalls', type: 'line', source: 'src-stalls', filter: ['any', polygonFilter, lineFilter],
+            paint: { 'line-color': '#737985', 'line-width': 0.85, 'line-opacity': 0.52 } },
+          { id: 'stalls-points', type: 'circle', source: 'src-stalls', filter: pointFilter,
+            paint: { 'circle-color': BUILDING_COLOR, 'circle-radius': 1.5, 'circle-opacity': 0.55 } },
+        ] }
+      }),
+    ]
+  }
   return [withBuildings(buildingsA, false), withBuildings(buildingsB ?? buildingsA, true)]
 }
 

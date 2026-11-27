@@ -111,11 +111,22 @@ vi.mock('../../stores/scenarios', async (importOriginal) => ({
   fetchOptionalMapLayer: async (candidates: [string, string][]) => {
     readLayer(candidates)
     const [folder, name] = candidates[0]!
-    if (folder === 'scenarioA' && ['trees.geojson', 'bus_stops.geojson'].includes(name)) {
+    if (folder === 'scenarioA' && name === 'trees.geojson') {
       return { type: 'FeatureCollection', features: [{
         type: 'Feature', properties: {},
         geometry: { type: 'Point', coordinates: [-99.188, 19.402] },
       }] }
+    }
+    if ((folder === 'scenarioA' && name === 'buses.geojson') ||
+        (folder === 'scenarioB' && name === 'new_buses.geojson')) {
+      const offsets = folder === 'scenarioA' ? [0, 0.0001, 0.0002] : [0.001, 0.0011]
+      return { type: 'FeatureCollection', features: offsets.map((offset) => {
+        const x = -99.188 + offset
+        const y = 19.402
+        return { type: 'Feature', properties: {},
+          geometry: { type: 'Polygon', coordinates: [[[x, y], [x + 0.0001, y],
+            [x + 0.0001, y + 0.00006], [x, y + 0.00006], [x, y]]] } }
+      }) }
     }
     const scenarioBuildings = name === 'extra_building1.geojson'
     const scenarioBGround = folder === 'scenarioB' && ['surfaces.geojson', 'shade.geojson', 'furniture.geojson'].includes(name)
@@ -212,16 +223,24 @@ it('shares the restored camera, dark vector ground, and slate extrusions before 
   expect(proposed?.getLayer('src-trees-points')).toMatchObject({
     paint: { 'circle-radius': 2.6, 'circle-opacity': 0.22, 'circle-stroke-width': 0.6, 'circle-stroke-opacity': 0.35 },
   })
+  for (const panel of [existing, proposed]) {
+    const layerIds = panel!.layers.map(({ id }) => id)
+    expect(layerIds.indexOf('bus-markers')).toBeLessThan(layerIds.indexOf('buildings-extrusion'))
+  }
   expect(proposed?.getLayer('bus-markers')).toMatchObject({
     type: 'fill', paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.6 },
   })
-  const marker = proposed?.getSource('src-bus-markers').data.features[0].geometry
-  expect(marker.type).toBe('Polygon')
-  expect(marker.coordinates[0]).toHaveLength(5)
-  expect(marker.coordinates[0][0]).toEqual(marker.coordinates[0][4])
-  const [[west, south], [east], [, north]] = marker.coordinates[0]
-  expect((east - west) * 111_320 * Math.cos(19.402 * Math.PI / 180)).toBeCloseTo(2.2, 3)
-  expect((north - south) * 111_320).toBeCloseTo(2.2, 3)
+  expect(existing?.getSource('src-bus-markers').data.features).toHaveLength(3)
+  expect(proposed?.getSource('src-bus-markers').data.features).toHaveLength(2)
+  for (const [panel, originalWest] of [[existing, -99.188], [proposed, -99.187]] as const) {
+    const marker = panel?.getSource('src-bus-markers').data.features[0].geometry
+    expect(marker.type).toBe('Polygon')
+    const [[west, south], [east], [, north]] = marker.coordinates[0]
+    expect(marker.coordinates[0][0]).toEqual(marker.coordinates[0][4])
+    expect((west + east) / 2).toBeCloseTo(originalWest + 0.00005, 8)
+    expect(east - west).toBeCloseTo(0.0001 * 2 / 3, 8)
+    expect(north - south).toBeCloseTo(0.00006 * 2 / 3, 8)
+  }
   expect(maps[1]?.getSource('src-buildings').data.features[0].properties.renderHeight).toBe(19)
   const footprints = maps[0]?.getSource('src-buildings').data.features
   expect(footprints.map(({ geometry }: { geometry: { type: string } }) => geometry.type))
