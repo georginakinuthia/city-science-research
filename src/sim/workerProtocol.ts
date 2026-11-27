@@ -307,6 +307,7 @@ export interface SnapshotBuffers {
   pedY: Float32Array
   pedHeading: Float32Array
   pedEngagementMode: Uint8Array
+  pedVisualRisk: Uint8Array
   pedStartNodeIdx: Int32Array
   pedIntimateViolations: Uint16Array
   pedPersonalViolations: Uint16Array
@@ -320,6 +321,7 @@ export function collectTransferables(b: SnapshotBuffers): Transferable[] {
     b.pedY.buffer,
     b.pedHeading.buffer,
     b.pedEngagementMode.buffer,
+    b.pedVisualRisk.buffer,
     b.pedStartNodeIdx.buffer,
     b.pedIntimateViolations.buffer,
     b.pedPersonalViolations.buffer,

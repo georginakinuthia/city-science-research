@@ -13,7 +13,8 @@
 
 import type { FeatureCollection, Geometry } from 'geojson'
 
-import { MAX_AGENTS } from '../config'
+import { TACUBAYA_CROWD } from '../config'
+import { getAgentVisualRisk } from './agentBehavior'
 import { type NodeState, spawnFromNodes } from '../stores/geo'
 import { setBehaviorParams } from './agentBehavior'
 import { ScenarioContainer } from './scenarioGen'
@@ -280,7 +281,7 @@ function handleInit(msg: InitMessage): void {
     })
 
     // The dual map snapshots fit in these buffers from startup to saturation.
-    const cap = mode === 'dual' ? MAX_AGENTS : 256
+    const cap = mode === 'dual' ? TACUBAYA_CROWD.capacity : 256
     for (let k = 0; k < 2; k++) {
       state.bufferPool.push(allocSnapshotBuffers(cap))
     }
@@ -448,6 +449,7 @@ function allocSnapshotBuffers(capacity: number): SnapshotBuffers {
     pedY: new Float32Array(capacity),
     pedHeading: new Float32Array(capacity),
     pedEngagementMode: new Uint8Array(capacity),
+    pedVisualRisk: new Uint8Array(capacity),
     pedStartNodeIdx: new Int32Array(capacity),
     pedIntimateViolations: new Uint16Array(capacity),
     pedPersonalViolations: new Uint16Array(capacity),
@@ -485,6 +487,8 @@ function buildSnapshot(state: SimState): SimSnapshot {
   const pedY = sim.pedY
   const pedHeading = sim.pedHeading
   const pedEngagementMode = sim.pedEngagementMode
+  // Crime is shared across maps, while congestion is measured per simulation.
+  const crimeProximity = sims[0]?.sim.routingCosts?.visualRisk
   const pedStartNodeIdx = sim.pedStartNodeIdx
   const pedIntimateViolations = sim.pedIntimateViolations
   const pedPersonalViolations = sim.pedPersonalViolations
@@ -498,6 +502,7 @@ function buildSnapshot(state: SimState): SimSnapshot {
     bufs.pedY[w] = pedY[i]!
     bufs.pedHeading[w] = pedHeading[i]!
     bufs.pedEngagementMode[w] = pedEngagementMode[i]!
+    bufs.pedVisualRisk[w] = getAgentVisualRisk(sim, i, crimeProximity)
     bufs.pedStartNodeIdx[w] = pedStartNodeIdx[i]!
     bufs.pedIntimateViolations[w] = pedIntimateViolations[i]!
     bufs.pedPersonalViolations[w] = pedPersonalViolations[i]!
@@ -512,6 +517,7 @@ function buildSnapshot(state: SimState): SimSnapshot {
     pedY: bufs.pedY,
     pedHeading: bufs.pedHeading,
     pedEngagementMode: bufs.pedEngagementMode,
+    pedVisualRisk: bufs.pedVisualRisk,
     pedStartNodeIdx: bufs.pedStartNodeIdx,
     pedIntimateViolations: bufs.pedIntimateViolations,
     pedPersonalViolations: bufs.pedPersonalViolations,

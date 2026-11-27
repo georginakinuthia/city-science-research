@@ -2,6 +2,8 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 import { DARKEST, LIGHT, LIGHTER } from '../assets/palette'
+import { getAgentVisualRisk } from '../sim/agentBehavior'
+import { AGENT_RISK_COLORS } from '../sim/colors'
 import type { Simulation } from '../sim/Simulation'
 import type { SandboxTerrainDef } from '../stores/sandboxTerrains'
 
@@ -34,7 +36,6 @@ export class ThreeView {
 
   private agentMesh!: THREE.InstancedMesh
   private agentDummy = new THREE.Object3D()
-  private agentColorCache = new Map<string, THREE.Color>()
 
   private terrainGroup = new THREE.Group()
   private nodeGroup = new THREE.Group()
@@ -59,11 +60,6 @@ export class ThreeView {
     this.model = model
     this.terrain = terrain
     this.nodeColorMap = nodeColorMap
-
-    // Pre-cache node colors as THREE.Color
-    for (const [id, hex] of nodeColorMap) {
-      this.agentColorCache.set(id, new THREE.Color(hex))
-    }
 
     // Grid dimensions in cell units. y grows south.
     this.worldWidth = model.width
@@ -179,7 +175,7 @@ export class ThreeView {
 
   private buildAgentMesh(): void {
     // Colored fill
-    const agentGeom = new THREE.CircleGeometry(0.3, 12)
+    const agentGeom = new THREE.CircleGeometry(0.105, 12)
     const agentMat = new THREE.MeshBasicMaterial()
     this.agentMesh = new THREE.InstancedMesh(agentGeom, agentMat, MAX_AGENTS)
     this.agentMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
@@ -334,17 +330,14 @@ export class ThreeView {
     this.mistTexture.needsUpdate = true
   }
 
-  private static DEFAULT_COLOR = new THREE.Color(LIGHT)
+  private static AGENT_COLORS = AGENT_RISK_COLORS.map((color) => new THREE.Color(color))
 
   private updateAgents(): void {
     const dummy = this.agentDummy
-    const defaultColor = ThreeView.DEFAULT_COLOR
     const sim = this.model
     const alive = sim.pedAlive
     const pedX = sim.pedX
     const pedY = sim.pedY
-    const startIdx = sim.pedStartNodeIdx
-    const nodeIdTable = sim.nodeIdTable
     const n = sim.pedCount
     let idx = 0
 
@@ -356,10 +349,8 @@ export class ThreeView {
       dummy.updateMatrix()
       this.agentMesh.setMatrixAt(idx, dummy.matrix)
 
-      const startNodeIdx = startIdx[i]!
-      const startNodeId = startNodeIdx >= 0 ? nodeIdTable[startNodeIdx] : undefined
-      const color = (startNodeId !== undefined ? this.agentColorCache.get(startNodeId) : undefined) ?? defaultColor
-      this.agentMesh.setColorAt(idx, color)
+      const color = getAgentVisualRisk(sim, i)
+      this.agentMesh.setColorAt(idx, ThreeView.AGENT_COLORS[color] ?? ThreeView.AGENT_COLORS[0]!)
 
       idx++
     }

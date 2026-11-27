@@ -21,6 +21,7 @@ function makeBuffers(capacity = 16): SnapshotBuffers {
     pedY: new Float32Array(capacity),
     pedHeading: new Float32Array(capacity),
     pedEngagementMode: new Uint8Array(capacity),
+    pedVisualRisk: new Uint8Array(capacity),
     pedStartNodeIdx: new Int32Array(capacity),
     pedIntimateViolations: new Uint16Array(capacity),
     pedPersonalViolations: new Uint16Array(capacity),
@@ -32,10 +33,11 @@ describe('collectTransferables', () => {
   it('returns one ArrayBuffer per typed-array field, in a stable order', () => {
     const bufs = makeBuffers(8)
     const transferables = collectTransferables(bufs)
-    expect(transferables).toHaveLength(8)
+    expect(transferables).toHaveLength(9)
     expect(transferables[0]).toBe(bufs.pedX.buffer)
     expect(transferables[1]).toBe(bufs.pedY.buffer)
-    expect(transferables[7]).toBe(bufs.pedSocialViolations.buffer)
+    expect(transferables[4]).toBe(bufs.pedVisualRisk.buffer)
+    expect(transferables[8]).toBe(bufs.pedSocialViolations.buffer)
     // Every element is an ArrayBuffer (the transferable form of a typed array)
     for (const t of transferables) {
       expect(t).toBeInstanceOf(ArrayBuffer)

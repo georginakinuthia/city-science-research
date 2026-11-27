@@ -1,0 +1,33 @@
+{
+"type": "FeatureCollection",
+"name": "street_lights__streetlight",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"xy_coordinate_resolution": 1e-06,
+"features": [
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189287, 19.403147 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189287, 19.403147 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189275, 19.403274 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189298, 19.402998 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189308, 19.402864 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189327, 19.402721 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.18933, 19.402537 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189142, 19.40246 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188784, 19.40244 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188467, 19.402429 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.18846, 19.402655 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188452, 19.402951 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188423, 19.403207 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188596, 19.403315 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188969, 19.403348 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188239, 19.402188 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188659, 19.402048 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188971, 19.401842 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.18887, 19.401759 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188583, 19.401939 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188275, 19.402031 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.18784, 19.402107 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188126, 19.401565 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.189358, 19.401592 ] } },
+{ "type": "Feature", "properties": { "id": 2, "visibility_radius": 10, "notes": null }, "geometry": { "type": "Point", "coordinates": [ -99.188503, 19.401499 ] } }
+]
+}

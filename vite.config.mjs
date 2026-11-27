@@ -1,5 +1,6 @@
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
+import { readdirSync } from 'node:fs'
 import { fileURLToPath, URL } from 'url'
 import { defineConfig } from 'vite'
 import svgLoader from 'vite-svg-loader'
@@ -8,6 +9,11 @@ import svgLoader from 'vite-svg-loader'
 export default defineConfig(({ command }) => {
   return {
     base: command === 'build' ? '/city-science-research/' : '/',
+    define: {
+      __SCENARIO_FILES__: JSON.stringify(Object.fromEntries(['scenarioA', 'scenarioB'].map((folder) =>
+        [folder, readdirSync(new URL(`./public/${folder}/`, import.meta.url))],
+      ))),
+    },
     plugins: [
       vue(),
       tailwindcss(),

@@ -12,6 +12,7 @@ import {
 import {
   advanceAgent,
   createDefaultBehaviorParams,
+  getAgentVisualRisk,
   initialiseAgent,
   recomputeAgentParams,
   setBehaviorParams,
@@ -196,6 +197,45 @@ describe('demographic routing', () => {
     }
     expect(detoured).toBe(true)
     expect(out.hasArrived).toBe(true)
+  })
+
+  it('keeps a standard agent active when a wall separates it from a nearby destination', () => {
+    const { sim, setBarrier } = buildSimulation()
+    const start = node('start', 10, 4)
+    const target = node('target', 12, 4)
+    setBarrier(13, [start, target])
+    const wall = sim.cellAt(11, 4)
+    sim.routingCosts!.walkable[wall] = 0
+    sim.surfacePotential[wall] = -1
+    const i = sim.spawnAgent()
+    initialiseAgent(sim, i, start, target, 0, 0)
+    sim.pedProfile[i] = DemographicProfile.standard
+
+    advanceAgent(sim, i, sim.advanceResult)
+    expect(sim.advanceResult.hasArrived).toBe(false)
+    expect(sim.pedAlive[i]).toBe(1)
+    expect(sim.pedCellIdx[i]).not.toBe(wall)
+  })
+
+  it('colors only for high local density or crime proximity', () => {
+    const { sim, setBarrier } = buildSimulation()
+    const start = node('start', 7, 4)
+    const target = node('target', 15, 4)
+    setBarrier(13, [start, target])
+    const i = sim.spawnAgent()
+    initialiseAgent(sim, i, start, target, 0, 0)
+    const cell = sim.pedCellIdx[i]!
+    const crimeProximity = new Uint8Array(sim.cellCount)
+    sim.routingCosts!.visualRisk = crimeProximity
+
+    expect(getAgentVisualRisk(sim, i)).toBe(0)
+    sim.density[cell] = 60
+    expect(getAgentVisualRisk(sim, i)).toBe(1)
+    crimeProximity[cell] = 2
+    expect(getAgentVisualRisk(sim, i)).toBe(2)
+    sim.density[cell] = 0
+    crimeProximity[cell] = 0
+    expect(getAgentVisualRisk(sim, i)).toBe(0)
   })
 
   it('rejects unavailable accessible trips and prevents arrivals across a nearby barrier', () => {

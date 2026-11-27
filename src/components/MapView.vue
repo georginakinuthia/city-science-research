@@ -1,9 +1,9 @@
 <script setup>
 import maplibregl from 'maplibre-gl'
-import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
+import { defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
 
-import { ACCENT, EMBER, LIGHTER } from '../assets/palette'
-import { addTacubayaMapLayers, createMapRenderer, createTacubayaBasemap } from '../sim/createMapRenderer'
+import { createTacubayaAgentsLayer } from '../rendering/TacubayaAgentsLayer'
+import { addTacubayaMapAssets, createTacubayaBasemap, loadTacubayaMapAssets } from '../sim/createMapRenderer'
 import { useMapStore } from '../stores/map'
 import { useModelsStore } from '../stores/models'
 import { useScenariosStore } from '../stores/scenarios'
@@ -16,36 +16,34 @@ const modelsStore = useModelsStore()
 const scenariosStore = useScenariosStore()
 const simStore = useSimulationStore()
 const loadError = ref('')
-const colors = { agent: LIGHTER, shopping: EMBER, waiting: ACCENT, highlight: ACCENT }
 const panels = [
-  { container: 'mapA', folder: 'scenarioA', map: null, renderer: null },
-  { container: 'mapB', folder: 'scenarioB', map: null, renderer: null },
+  { container: 'mapA', map: null, renderer: null },
+  { container: 'mapB', map: null, renderer: null },
 ]
 let disposed = false
-
-function updateNodes(map) {
-  const nodes = scenariosStore.nodesBuffered
-  if (nodes) map.getSource('src-nodes-buffer')?.setData(nodes)
-}
-
-watch(() => modelsStore.selectedNodeId, () => {
-  for (const { renderer } of panels) renderer?.draw()
-})
 
 onMounted(async () => {
   try {
     // The local basemap and site overlays have no dependency on simulation startup.
+    const assets = loadTacubayaMapAssets().catch((error) => {
+      console.error('Tacubaya map layers could not load:', error)
+      return []
+    })
     for (const panel of panels) {
       const map = new maplibregl.Map({
         ...mapStore.baseConfig,
         container: panel.container,
-        style: createTacubayaBasemap(panel.folder),
+        style: createTacubayaBasemap(),
       })
       panel.map = map
-      map.once('style.load', () => {
-        addTacubayaMapLayers(map, panel.folder)
-        updateNodes(map)
-        panel.renderer?.draw()
+      let styleGeneration = 0
+      map.on('style.load', async () => {
+        const generation = ++styleGeneration
+        panel.renderer?.attach()
+        const loaded = await assets
+        if (disposed || generation !== styleGeneration) return
+        addTacubayaMapAssets(map, loaded)
+        mapStore.applyLayerVisibility(map)
       })
     }
     mapStore.setMapReferences(panels[0].map, panels[1].map)
@@ -54,18 +52,20 @@ onMounted(async () => {
     if (disposed) return
     const { scenarioA, scenarioB, sharedNodes, error } = scenariosStore
     if (!scenarioA || !scenarioB) throw new Error(error || 'Scenario data is unavailable.')
-    for (const { map } of panels) updateNodes(map)
 
     const models = await modelsStore.initModel(scenarioA, scenarioB, sharedNodes)
     if (disposed) return
 
     for (const [index, panel] of panels.entries()) {
       const model = models[index]
-      panel.renderer = createMapRenderer(panel.map, model, {
-        selectedStartNodeIdx: () => model.nodeIdxFor(modelsStore.selectedNodeId),
-        colors,
-      })
-      panel.renderer.draw()
+      const { map } = panel
+      panel.renderer = {
+        attach() {
+          if (!map.getLayer('agents')) map.addLayer(createTacubayaAgentsLayer(model))
+        },
+        draw() { map.triggerRepaint() },
+      }
+      if (map.getLayer('background')) panel.renderer.attach()
     }
     modelsStore.getClient()?.onSnapshot((index) => {
       if (!simStore.isRunning) panels[index]?.renderer?.draw()

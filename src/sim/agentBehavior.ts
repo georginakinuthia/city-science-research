@@ -413,7 +413,7 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
 
     const nDist = nodeField?.[nIdx] ?? Infinity
     const distGain = tDist - nDist
-    if (distGain < 0) continue
+    if (distGain < 0 || (routing && distGain === 0)) continue
 
     const nx = nIdx % width
     const ny = (nIdx / width) | 0
@@ -1117,6 +1117,42 @@ function calculateHeading(sim: Simulation, i: number, targetDist: number, stepDt
   sim.pedMnlHeading[i] = state.heading
 }
 
+// If steering into a barrier blocks this tick, try a reachable downhill grid
+// neighbor at the same speed budget, stopping at its center at most.
+function recoverBlockedStep(
+  sim: Simulation, i: number, tx: number, ty: number, stepCells: number, stepFree?: Uint8Array,
+): number {
+  const field = sim.agentDistanceField(i)
+  if (!field) return 0
+  const cell = sim.cellAt(tx, ty)
+  const base = cell * 9
+  const neighbors = sim.walkableNeighborTable
+  let bestCost = field[cell]!
+  let bestCell = -1
+  for (let k = 1; k <= neighbors[base]!; k++) {
+    const candidate = neighbors[base + k]!
+    const cost = field[candidate]!
+    if (cost >= bestCost) continue
+    const x = candidate % sim.width
+    const y = Math.floor(candidate / sim.width)
+    if (stepFree ? !isStepFreePath(sim, stepFree, tx, ty, x, y) : !isPathClear(sim, tx, ty, x, y)) continue
+    bestCell = candidate
+    bestCost = cost
+  }
+  if (bestCell < 0) return 0
+
+  const dx = bestCell % sim.width - tx
+  const dy = Math.floor(bestCell / sim.width) - ty
+  const distance = Math.hypot(dx, dy)
+  const traveled = Math.min(distance, stepCells)
+  const fraction = traveled / distance
+  const heading = radToCompassDeg(Math.atan2(-dy, dx))
+  sim.setAgentPosition(i, tx + dx * fraction, ty + dy * fraction)
+  sim.setAgentHeading(i, heading)
+  sim.pedMnlHeading[i] = heading
+  return traveled
+}
+
 /**
  * Advance agent `i` one tick. Writes results into `out` — no allocation.
  * Part of the public API consumed by `Simulation.advanceAgents`.
@@ -1138,7 +1174,9 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
   const targetY = sim.pedTargetY[i]!
   const stepFree = requiresStepFree(sim.pedProfile[i]!) ? sim.routingCosts?.stepFree : undefined
   const targetDist = Math.hypot(targetX - tx, targetY - ty)
-  if (targetDist <= _p.arrivalRadius && (!stepFree || isStepFreePath(sim, stepFree, tx, ty, targetX, targetY))) {
+  const arrivalMask = stepFree ?? sim.routingCosts?.walkable
+  if (targetDist <= _p.arrivalRadius &&
+      (!arrivalMask || isStepFreePath(sim, arrivalMask, tx, ty, targetX, targetY))) {
     sim.killAgent(i)
     out.hasArrived = true
     return
@@ -1157,14 +1195,17 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
     : Number.isFinite(sim.pedSpeed[i]!)
       ? sim.pedSpeed[i]!
       : 0
-  const safeSpeed = Number.isFinite(speedMs) ? speedMs : fallbackSpeed
+  const crossingFactor = sim.routingCosts?.crossingSpeed?.[cellIdx] ?? 1
+  const safeSpeed = (Number.isFinite(speedMs) ? speedMs : fallbackSpeed) * crossingFactor
 
   sim.setAgentHeading(i, safeHeading)
   sim.pedCurrentSpeed[i] = safeSpeed
 
   const stepDistance = safeSpeed * stepDt
   if (Number.isFinite(stepDistance) && stepDistance > 0) {
-    sim.advanceAgentForward(i, stepDistance / (sim.routingCosts ? sim.metersPerCell : 1))
+    const metersPerCell = sim.routingCosts ? sim.metersPerCell : 1
+    const stepCells = stepDistance / metersPerCell
+    sim.advanceAgentForward(i, stepCells)
 
     const landedIdx = sim.pedCellIdx[i]!
     const landedPotential = landedIdx >= 0 ? (sim.surfacePotential[landedIdx] ?? 0) : -1
@@ -1174,6 +1215,10 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
         : !isPathClear(sim, tx, ty, sim.pedX[i]!, sim.pedY[i]!))
     if (pathBlocked) {
       sim.setAgentPosition(i, tx, ty)
+      if (sim.routingCosts && sim.pedEngagementMode[i] === ENGAGEMENT_OFF) {
+        out.distanceTraveled = recoverBlockedStep(sim, i, tx, ty, stepCells, stepFree) * metersPerCell
+        sim.pedCurrentSpeed[i] = out.distanceTraveled / stepDt
+      }
     } else {
       out.distanceTraveled += stepDistance
     }
@@ -1183,7 +1228,7 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
   const newTy = sim.pedY[i]!
   const remainingDist = Math.hypot(targetX - newTx, targetY - newTy)
   if (remainingDist <= _p.arrivalRadius &&
-      (!stepFree || isStepFreePath(sim, stepFree, newTx, newTy, targetX, targetY))) {
+      (!arrivalMask || isStepFreePath(sim, arrivalMask, newTx, newTy, targetX, targetY))) {
     sim.killAgent(i)
     out.hasArrived = true
   }
@@ -1242,9 +1287,7 @@ export function initialiseAgent(
   sim.pedProfile[i] = profile
   sim.pedSpeed[i] = baseAgentSpeed(profile, agentId, hasChild ? 1 : 1.2)
 
-  if (needsStepFree && sim.routingCosts &&
-      !Number.isFinite(sim.agentDistanceField(i)?.[sim.pedCellIdx[i]!])) {
-    // An inaccessible origin/destination pair cannot complete a step-free trip.
+  if (sim.routingCosts && !Number.isFinite(sim.agentDistanceField(i)?.[sim.pedCellIdx[i]!])) {
     sim.killAgent(i)
     return
   }
@@ -1304,4 +1347,16 @@ export function recomputeAgentParams(sim: Simulation, i: number): void {
   sim.pedRouteStraightness[i] = clamp01(baseStraightness + straightnessOffset)
 
   sim.pedRouteBiasWeight[i] = dispersion * ROUTE_CHOICE.biasStrengthScale
+}
+
+const CONGESTION_DENSITY_PER_SQUARE_METER = 1.5
+
+/** Classify the display color using crime proximity and the existing density grid. */
+export function getAgentVisualRisk(
+  sim: Simulation, index: number, crimeProximity = sim.routingCosts?.visualRisk,
+): number {
+  if (!crimeProximity) return 0
+  if (crimeProximity[sim.pedCellIdx[index] ?? -1] === 2) return 2
+  const density = getLocalDensity(sim, index) / sim.metersPerCell ** 2
+  return density >= CONGESTION_DENSITY_PER_SQUARE_METER ? 1 : 0
 }

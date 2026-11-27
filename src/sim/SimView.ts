@@ -82,6 +82,7 @@ export class SimView {
   get pedX(): Float32Array { return this._snapshot.pedX }
   get pedY(): Float32Array { return this._snapshot.pedY }
   get pedHeading(): Float32Array { return this._snapshot.pedHeading }
+  get pedVisualRisk(): Uint8Array { return this._snapshot.pedVisualRisk }
   get pedEngagementMode(): Uint8Array { return this._snapshot.pedEngagementMode }
   get pedStartNodeIdx(): Int32Array { return this._snapshot.pedStartNodeIdx }
   get pedIntimateViolations(): Uint16Array { return this._snapshot.pedIntimateViolations }

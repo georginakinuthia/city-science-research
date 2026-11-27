@@ -1,0 +1,16 @@
+{
+"type": "FeatureCollection",
+"name": "zebra_crossings",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"xy_coordinate_resolution": 1e-06,
+"features": [
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 1, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.188558, 19.4024 ], [ -99.188487, 19.402399 ], [ -99.188502, 19.402233 ], [ -99.18857, 19.402235 ], [ -99.188558, 19.4024 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 2, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.189054, 19.401712 ], [ -99.189038, 19.401731 ], [ -99.188932, 19.401692 ], [ -99.188942, 19.401681 ], [ -99.188942, 19.401681 ], [ -99.188946, 19.401674 ], [ -99.189054, 19.401712 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 3, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.188872, 19.401617 ], [ -99.188843, 19.401615 ], [ -99.188858, 19.401481 ], [ -99.188878, 19.401483 ], [ -99.188872, 19.401617 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 4, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.189068, 19.401519 ], [ -99.188971, 19.40148 ], [ -99.188986, 19.401463 ], [ -99.189069, 19.4015 ], [ -99.189068, 19.401519 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 5, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.188182, 19.401557 ], [ -99.188136, 19.401554 ], [ -99.188153, 19.401448 ], [ -99.188184, 19.401448 ], [ -99.188182, 19.401557 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 6, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.187812, 19.402077 ], [ -99.187735, 19.402041 ], [ -99.187748, 19.402023 ], [ -99.187819, 19.402061 ], [ -99.187812, 19.402077 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 7, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.187709, 19.401997 ], [ -99.187695, 19.402017 ], [ -99.187626, 19.401982 ], [ -99.18764, 19.401968 ], [ -99.18764, 19.401966 ], [ -99.187709, 19.401997 ] ] ] } },
+{ "type": "Feature", "properties": { "has_signal": 0, "obstructed": 0, "lit": 1, "visibility": 0.75, "risk_score": 0.25, "id": 8, "width_m": 2.0 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -99.187635, 19.402029 ], [ -99.187658, 19.402053 ], [ -99.187524, 19.402088 ], [ -99.187519, 19.40206 ], [ -99.187635, 19.402029 ] ] ] } }
+]
+}

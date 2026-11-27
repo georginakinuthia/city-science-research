@@ -1,5 +1,14 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, reactive, ref, shallowRef } from 'vue'
+
+import { TACUBAYA_CAMERA, type TacubayaLegendLayer } from '../config'
+
+const legendLayers: Record<TacubayaLegendLayer, string[]> = {
+  stalls: ['stalls', 'stalls-fill', 'stalls-points'],
+  pedestrian_infrastructure: ['pedestrian-infrastructure-fill', 'src-walkway2-line'],
+  crime: ['crime-halo'],
+  trees: ['src-trees-points'],
+}
 
 export interface MapBounds {
   southwest: [number, number]
@@ -16,18 +25,36 @@ export interface MapState {
 
 export const useMapStore = defineStore('map', () => {
   // State
-  const center = ref<[number, number]>([-99.1873, 19.4027])
-  const zoom = ref(16.5)
-  const bearing = ref(0)
-  const pitch = ref(30)
+  const center = ref([...TACUBAYA_CAMERA.center] as [number, number])
+  const zoom = ref(TACUBAYA_CAMERA.zoom)
+  const bearing = ref(TACUBAYA_CAMERA.bearing)
+  const pitch = ref(TACUBAYA_CAMERA.pitch)
   const zoomMin = ref(14)
   const zoomMax = ref(20)
-  const mapA = ref<any>(null)
-  const mapB = ref<any>(null)
+  const mapA = shallowRef<any>(null)
+  const mapB = shallowRef<any>(null)
 
   const hasMapA = computed(() => !!mapA.value)
   const hasMapB = computed(() => !!mapB.value)
   const hasBothMaps = computed(() => !!mapA.value && !!mapB.value)
+
+  const layerVisibility = reactive<Record<TacubayaLegendLayer, boolean>>({
+    stalls: true, pedestrian_infrastructure: true, crime: true, trees: true,
+  })
+
+  function applyLayerVisibility(map: any) {
+    for (const key of Object.keys(legendLayers) as TacubayaLegendLayer[]) {
+      for (const id of legendLayers[key]) {
+        if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', layerVisibility[key] ? 'visible' : 'none')
+      }
+    }
+  }
+
+  function toggleLayer(layer: TacubayaLegendLayer) {
+    layerVisibility[layer] = !layerVisibility[layer]
+    if (mapA.value) applyLayerVisibility(mapA.value)
+    if (mapB.value) applyLayerVisibility(mapB.value)
+  }
 
   // Getters
   const mapState = computed(
@@ -47,8 +74,7 @@ export const useMapStore = defineStore('map', () => {
     interactive: true,
     minZoom: zoomMin.value,
     maxZoom: zoomMax.value,
-    style:
-      'https://api.maptiler.com/maps/87d1134a-2d44-4c8e-af47-ed81f2e30371/style.json?key=go6pmAvswrTZcAQVPQcy',
+    maxPitch: TACUBAYA_CAMERA.maxPitch,
   }))
 
   // Actions
@@ -66,11 +92,17 @@ export const useMapStore = defineStore('map', () => {
     source.on('move', () => {
       if (syncing) return
       syncing = true
-      target.setCenter(source.getCenter())
-      target.setZoom(source.getZoom())
-      target.setBearing(source.getBearing())
-      target.setPitch(source.getPitch())
-      syncing = false
+      try {
+        const position = source.getCenter()
+        const camera = {
+          center: [position.lng, position.lat] as [number, number],
+          zoom: source.getZoom(), bearing: source.getBearing(), pitch: source.getPitch(),
+        }
+        updateMapState(camera)
+        target.jumpTo(camera)
+      } finally {
+        syncing = false
+      }
     })
   }
 
@@ -88,8 +120,7 @@ export const useMapStore = defineStore('map', () => {
     center.value = newCenter
     if (mapA.value) {
       mapA.value.setCenter(newCenter)
-    }
-    if (mapB.value) {
+    } else if (mapB.value) {
       mapB.value.setCenter(newCenter)
     }
   }
@@ -98,8 +129,7 @@ export const useMapStore = defineStore('map', () => {
     zoom.value = newZoom
     if (mapA.value) {
       mapA.value.setZoom(newZoom, { duration: 250 })
-    }
-    if (mapB.value) {
+    } else if (mapB.value) {
       mapB.value.setZoom(newZoom, { duration: 250 })
     }
   }
@@ -113,8 +143,7 @@ export const useMapStore = defineStore('map', () => {
     bearing.value = newBearing
     if (mapA.value) {
       mapA.value.setBearing(newBearing)
-    }
-    if (mapB.value) {
+    } else if (mapB.value) {
       mapB.value.setBearing(newBearing)
     }
   }
@@ -123,23 +152,21 @@ export const useMapStore = defineStore('map', () => {
     pitch.value = newPitch
     if (mapA.value) {
       mapA.value.setPitch(newPitch)
-    }
-    if (mapB.value) {
+    } else if (mapB.value) {
       mapB.value.setPitch(newPitch)
     }
   }
 
   // Pan by pixel offset (applies to both maps)
   function panBy(offset: [number, number]) {
-    if (mapA.value) mapA.value.panBy(offset, { duration: 250 })
-    if (mapB.value) mapB.value.panBy(offset, { duration: 250 })
+    const map = mapA.value ?? mapB.value
+    map?.panBy(offset, { duration: 250 })
   }
 
   function fitToBounds(bounds: [[number, number], [number, number]], padding = 50) {
     if (mapA.value) {
       mapA.value.fitBounds(bounds, { padding })
-    }
-    if (mapB.value) {
+    } else if (mapB.value) {
       mapB.value.fitBounds(bounds, { padding })
     }
   }
@@ -210,6 +237,9 @@ export const useMapStore = defineStore('map', () => {
     // Actions
     updateMapState,
     setMapReferences,
+    layerVisibility,
+    applyLayerVisibility,
+    toggleLayer,
     setCenter,
     setZoom,
     zoomBy,

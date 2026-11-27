@@ -15,6 +15,7 @@ function makeBuffers(capacity = 16): SnapshotBuffers {
     pedY: new Float32Array(capacity),
     pedHeading: new Float32Array(capacity),
     pedEngagementMode: new Uint8Array(capacity),
+    pedVisualRisk: new Uint8Array(capacity),
     pedStartNodeIdx: new Int32Array(capacity),
     pedIntimateViolations: new Uint16Array(capacity),
     pedPersonalViolations: new Uint16Array(capacity),

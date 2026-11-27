@@ -48,6 +48,9 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
     ['/scenarioA/study_boundary.geojson', featureCollection([boundary])],
     ['/scenarioA/metro_stations.geojson', featureCollection([point(inside)])],
     ['/scenarioA/bus_stops.geojson', busStops],
+    ['/scenarioA/zebra_crossings.geojson', featureCollection([boundary])],
+    ['/scenarioA/street_lights.geojson', featureCollection([point(inside, { visibility_radius: 10 })])],
+    ['/scenarioB/street_lights.geojson', empty],
     ['/scenarioB/tacubaya_stalls.geojson', empty],
     ['/scenarioB/bus_stops.geojson', empty],
     ['/scenarioB/metro_stations.geojson', featureCollection([point(hole), point(inside)])],
@@ -78,6 +81,11 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
   expect(store.scenarioB?.routing?.studyBoundary).toEqual(featureCollection([boundary]))
   expect(store.scenarioB?.routing?.pedestrian?.metro.features).toHaveLength(1)
   expect(store.scenarioB?.routing?.transport.features[0]?.properties?.name).toBe('Local, "Express"')
+  const sharedLights = store.scenarioA?.routing?.pedestrian?.streetLights
+  expect(sharedLights?.features).toHaveLength(1)
+  expect(store.scenarioB?.routing?.pedestrian?.streetLights).toBe(sharedLights)
+  expect(store.scenarioB?.routing?.pedestrian?.zebraCrossings?.features[0]?.properties)
+    .toMatchObject({ id: 1, has_signal: 0, obstructed: 1, lit: 1 })
   const crowd = store.scenarioB?.routing?.crowd
   expect(crowd?.destinations).toEqual([inside])
   expect(store.scenarioA?.routing?.crowd?.busStops).toEqual([inside])
@@ -88,6 +96,6 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
     fetch.mock.calls.filter(([url]) => url.pathname === '/scenarioA/streets.geojson'),
   ).toHaveLength(1)
   expect(fetch.mock.calls.some(([url]) =>
-    /\/(?:shade|furniture|surfaces|walkway2|boundary|destinations|street_stalls|stalls|buildings)\.geojson$/.test(url.pathname),
+    /\/(?:shade|furniture|surfaces|walkway2|boundary|destinations|street_stalls|buildings)\.geojson$/.test(url.pathname),
   )).toBe(false)
 })

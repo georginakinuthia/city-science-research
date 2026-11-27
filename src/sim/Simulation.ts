@@ -796,7 +796,7 @@ export class Simulation {
     const crowd = this.initialCrowd
     if (!crowd?.targets.length || !crowd.positions.length) return
     const { targets, positions } = crowd
-    this.growPedCapacity(MAX_AGENTS)
+    this.growPedCapacity(TACUBAYA_CROWD.capacity)
 
     let randomState = 0x54414355
     const random = () => {
@@ -843,7 +843,7 @@ export class Simulation {
           entry = node
         }
       }
-      if (this.pedCount >= MAX_AGENTS) this.compactDead()
+      if (this.pedCount >= TACUBAYA_CROWD.capacity) this.compactDead()
       const i = this.spawnAgent()
       pureInitialiseAgent(this, i, entry, target, NaN, NaN, [x, y])
     }
@@ -1007,8 +1007,9 @@ export class Simulation {
   private spawnPending(): void {
     const spawns = this.pendingSpawns
     if (spawns.length === 0) return
+    const capacity = this.initialCrowd ? TACUBAYA_CROWD.capacity : MAX_AGENTS
     for (let k = 0; k < spawns.length; k++) {
-      if (this.pedAliveCount >= MAX_AGENTS) break
+      if (this.pedAliveCount >= capacity) break
       const spec = spawns[k]!
       if (!spec.destNode) continue
       const crowd = this.initialCrowd
@@ -1023,7 +1024,7 @@ export class Simulation {
       }
       const startNode = entry ?? spec.startNode
       const destNode = destination ?? spec.destNode
-      if (this.pedCount >= MAX_AGENTS) this.compactDead()
+      if (this.pedCount >= capacity) this.compactDead()
       const i = this.spawnAgent()
       pureInitialiseAgent(this, i, startNode, destNode, spec.shopProb, spec.waitProb)
 
@@ -1033,7 +1034,7 @@ export class Simulation {
       const boost = (TACUBAYA_CROWD.replenishmentThreshold - this.pedAliveCount) /
         TACUBAYA_CROWD.replenishmentBand
       if (Math.random() < boost) {
-        if (this.pedCount >= MAX_AGENTS) this.compactDead()
+        if (this.pedCount >= capacity) this.compactDead()
         const extra = this.spawnAgent()
         const position = [
           startNode.worldX! + (Math.random() - 0.5) * 0.8,

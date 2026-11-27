@@ -26,12 +26,23 @@ export const TIMING = {
 
 export const MAX_AGENTS = 800
 
+export const TACUBAYA_CAMERA = {
+  center: [-99.1868, 19.4042] as [number, number],
+  zoom: 16.35,
+  pitch: 47,
+  bearing: 22,
+  maxPitch: 75,
+}
+
+const TACUBAYA_DENSITY_MULTIPLIER = 3
+
 // Peak transfer-wave demand distributed across the Tacubaya hub.
 export const TACUBAYA_CROWD = {
-  initialAgents: 400,
-  replenishmentThreshold: 650,
-  replenishmentBand: 250,
-  peakPph: 24_000,
+  initialAgents: 400 * TACUBAYA_DENSITY_MULTIPLIER,
+  capacity: MAX_AGENTS * TACUBAYA_DENSITY_MULTIPLIER,
+  replenishmentThreshold: 650 * TACUBAYA_DENSITY_MULTIPLIER,
+  replenishmentBand: 250 * TACUBAYA_DENSITY_MULTIPLIER,
+  peakPph: 24_000 * TACUBAYA_DENSITY_MULTIPLIER,
   entrySnapMeters: 30,
   initialTargetLimit: 6,
   initialTripMeters: 25,
@@ -190,3 +201,22 @@ export const WGS84 = {
   // Approximate degrees-per-metre at the equator (for sandbox terrain generation)
   degPerMeterEquator: 0.000009,
 }
+
+export const TACUBAYA_LEGEND = [
+  { id: 'stalls', label: 'Informal stalls', color: '#ef4444' },
+  { id: 'pedestrian_infrastructure', label: 'Pedestrian infrastructure', color: '#94a3b8' },
+  { id: 'crime', label: 'Crime spots', color: '#ec4899' },
+  { id: 'trees', label: 'Trees', color: '#6b7280' },
+] as const
+export type TacubayaLegendLayer = (typeof TACUBAYA_LEGEND)[number]['id']
+export const CRIME_PROXIMITY_METERS = 15
+
+export const CROSSING = {
+  defaultLightRadiusMeters: 10,
+  approachMeters: 2,
+  obstacleClearanceMeters: 1,
+  trafficRadiusMeters: 8,
+  transitRadiusMeters: 15,
+  lowVisibility: 0.3,
+  highRisk: 0.55,
+} as const

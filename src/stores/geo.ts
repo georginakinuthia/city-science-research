@@ -1,12 +1,12 @@
 // Pure geographic/algorithmic functions extracted from scenarios.ts
 // Separated so they can be tested without triggering Pinia/Vue imports.
 
-import { distance, lineIntersect, pointOnFeature, polygonize } from '@turf/turf'
+import { area, bbox, booleanIntersects, buffer, distance, lineIntersect, pointOnFeature, pointToPolygonDistance, polygonize } from '@turf/turf'
 import type {
   Feature, FeatureCollection, Geometry, LineString, MultiPolygon, Point, Polygon, Position,
 } from 'geojson'
 
-import { GEOMETRY, WGS84 } from '../config'
+import { CRIME_PROXIMITY_METERS, CROSSING, GEOMETRY, WGS84 } from '../config'
 
 /** Places display markers on features without changing the simulation geometry. */
 export function toMarkerPoints(collection: FeatureCollection<Geometry>): FeatureCollection<Point> {
@@ -90,6 +90,10 @@ export interface CrowdAnchors {
   busStops?: [number, number][]
 }
 
+export const pedestrian_infrastructure = [
+  'pedestrian_infrastructure.geojson', 'walkway2.geojson', 'surfaces.geojson',
+] as const
+
 export interface RoutingData {
   transport: FeatureCollection<Geometry>
   walkways: FeatureCollection<Geometry>
@@ -106,6 +110,8 @@ interface PedestrianLayers {
   busStops: FeatureCollection<Point>
   crime: FeatureCollection<Geometry>
   economicActivity: FeatureCollection<Geometry>
+  streetLights?: FeatureCollection<Geometry>
+  zebraCrossings?: FeatureCollection<Polygon | MultiPolygon, CrossingProperties>
 }
 
 export interface PedestrianGrid {
@@ -137,6 +143,8 @@ export interface RoutingCosts {
   child: Float32Array
   pedestrian?: PedestrianGrid
   staticObstaclePotentials?: Float32Array
+  visualRisk?: Uint8Array
+  crossingSpeed?: Float32Array
 }
 
 // Constants for potential field decay rates (in meters)
@@ -397,6 +405,9 @@ export function buildPedestrianGrid(
   for (const { geometry } of [...layers.metro.features, ...layers.busStops.features]) {
     markCrossing(geometry, 8)
   }
+  for (const { geometry } of layers.zebraCrossings?.features ?? []) {
+    rasterizeRoute(geometry, grid, 0, (i) => { crossings[i] = 1 })
+  }
   for (let cell = 0; cell < walkable.length; cell++) {
     obstacles[cell] = obstacles[cell]! | busMask[cell]! | stallMask[cell]!
     if (blocks[cell] || obstacles[cell] || (roads[cell] && !crossings[cell])) walkable[cell] = 0
@@ -428,6 +439,8 @@ function flag(value: unknown): boolean | undefined {
     case 'yes':
       return true
     case '0':
+    case 'unlit':
+    case 'off':
     case 'false':
     case 'no':
       return false
@@ -439,6 +452,100 @@ function measurement(value: unknown): number | undefined {
   const text = String(value).trim().replace(/\s*(?:m|%)$/i, '')
   const number = Number(text)
   if (text && Number.isFinite(number)) return number
+}
+
+interface CrossingProperties {
+  id: number
+  width_m: number
+  length_m: number
+  has_signal: number
+  obstructed: number
+  lit: number
+  visibility: number
+  risk_score: number
+}
+
+function lightRadius(properties: Feature['properties']): number {
+  if (flag(properties?.lit) === false) return 0
+  return Math.max(0, measurement(properties?.visibility_radius) ?? CROSSING.defaultLightRadiusMeters)
+}
+
+export function enrichZebraCrossings(
+  crossings: FeatureCollection<Geometry>,
+  lights: FeatureCollection<Geometry>,
+  obstacles: FeatureCollection<Geometry>,
+  streets: FeatureCollection<Geometry>,
+  crime: FeatureCollection<Geometry>,
+  transit: FeatureCollection<Geometry>,
+): FeatureCollection<Polygon | MultiPolygon, CrossingProperties> {
+  const lamps = lights.features.flatMap(({ geometry, properties }) =>
+    geometry?.type === 'Point' ? [{ coordinates: geometry.coordinates, radius: lightRadius(properties) }] : [],
+  )
+  const index = (data: FeatureCollection<Geometry>) => data.features
+    .filter((feature) => feature?.geometry)
+    .map((feature) => ({ feature, bounds: bbox(feature, { recompute: true }) }))
+  const obstacleIndex = index(obstacles)
+  const streetIndex = index(streets)
+  const crimeIndex = index(crime)
+  const transitIndex = index(transit)
+  const ids = new Set<number>()
+  return {
+    type: 'FeatureCollection',
+    features: crossings.features.flatMap((feature, offset) => {
+      const geometry = feature?.geometry
+      if (geometry?.type !== 'Polygon' && geometry?.type !== 'MultiPolygon') return []
+      const polygon = { ...feature, geometry }
+      const nearby = (features: ReturnType<typeof index>, radius: number): number => {
+        const zone = buffer(polygon, radius, { units: 'meters' })
+        if (!zone) return 0
+        const [west, south, east, north] = bbox(zone)
+        return features.filter(({ feature: candidate, bounds: [x0, y0, x1, y1] }) =>
+          x0! <= east! && x1! >= west! && y0! <= north! && y1! >= south! && booleanIntersects(zone, candidate),
+        ).length
+      }
+      const p = feature.properties
+      let id = measurement(p?.id ?? feature.id) ?? offset + 1
+      if (!Number.isSafeInteger(id) || id < 0 || ids.has(id)) {
+        id = offset + 1
+        while (ids.has(id)) id++
+      }
+      ids.add(id)
+      const rings = geometry.type === 'Polygon' ? [geometry.coordinates[0]!] : geometry.coordinates.map((part) => part[0]!)
+      let length = 0
+      for (const ring of rings) {
+        for (const from of ring) {
+          for (const to of ring) length = Math.max(length, distance(from, to, { units: 'meters' }))
+        }
+      }
+      const width = measurement(p?.width_m) ?? 0
+      const measuredLength = measurement(p?.length_m) ?? 0
+      const obstructed = flag(p?.obstructed) === true || nearby(obstacleIndex, CROSSING.obstacleClearanceMeters) > 0
+      let illumination = lamps.length ? 0 : flag(p?.lit) === true ? 1 : 0
+      for (const lamp of lamps) {
+        if (!lamp.radius) continue
+        const gap = Math.max(0, pointToPolygonDistance(lamp.coordinates, polygon, { units: 'meters' }))
+        illumination = Math.max(illumination, 1 - gap / lamp.radius)
+      }
+      const traffic = nearby(streetIndex, CROSSING.trafficRadiusMeters) > 0
+      const transitNearby = nearby(transitIndex, CROSSING.transitRadiusMeters) > 0
+      const incidents = nearby(crimeIndex, CRIME_PROXIMITY_METERS)
+      return [{
+        ...polygon,
+        properties: {
+          ...p,
+          id,
+          width_m: width > 0 ? width : Math.max(0.1, area(polygon) / Math.max(0.1, length)),
+          length_m: measuredLength > 0 ? measuredLength : Math.max(0.1, length),
+          has_signal: Number(flag(p?.has_signal) === true),
+          obstructed: Number(obstructed),
+          lit: Number(illumination > 0),
+          visibility: illumination * (obstructed ? 0.5 : 1),
+          risk_score: Math.min(1, Math.min(incidents, 3) * 0.15 + (traffic ? 0.2 : 0) +
+            (transitNearby ? 0.1 : 0) + (obstructed ? 0.35 : 0)),
+        },
+      }]
+    }),
+  }
 }
 
 export function buildRoutingCosts(
@@ -453,8 +560,15 @@ export function buildRoutingCosts(
   const activity = new Uint8Array(count)
   const walkwayWidth = new Float32Array(count)
   const conflicts = new Uint8Array(count)
+  const visualRisk = data.pedestrian ? new Uint8Array(count) : undefined
   const stallCongestion = new Float32Array(count)
   const scale = grid.metersPerCell ?? 1
+
+  if (visualRisk && data.pedestrian) {
+    for (const { geometry } of data.pedestrian.crime.features) {
+      if (geometry) rasterizeRoute(geometry, grid, CRIME_PROXIMITY_METERS / scale, (i) => { visualRisk[i] = 2 })
+    }
+  }
 
   for (const [collection, transit] of [[data.transport, true], [data.walkways, false]] as const) {
     for (const { geometry, properties } of collection.features) {
@@ -497,6 +611,30 @@ export function buildRoutingCosts(
     }
   }
 
+  const crossings = data.pedestrian?.zebraCrossings?.features
+  const crossingSpeed = crossings?.length ? new Float32Array(count).fill(1) : undefined
+  const lamps = data.pedestrian?.streetLights?.features ?? []
+  const crossingCells = crossingSpeed && lamps.length ? new Uint8Array(count) : undefined
+  if (crossingSpeed && crossings) {
+    for (const { geometry, properties: p } of crossings) {
+      const factor = Math.max(0.35, 1 - (p.has_signal ? 0 : 0.15) -
+        Math.min(0.2, Math.max(0, p.width_m - 3, p.length_m - 8) * 0.025) -
+        (p.obstructed ? 0.25 : 0))
+      rasterizeRoute(geometry, grid, CROSSING.approachMeters / scale, (i) => {
+        crossingSpeed[i] = Math.min(crossingSpeed[i]!, factor)
+        if (crossingCells) {
+          crossingCells[i] = 1
+          if (lighting[i] !== 1) lighting[i] = -1
+        }
+      })
+    }
+  }
+  for (const { geometry, properties } of lamps) {
+    const radius = lightRadius(properties)
+    if (geometry?.type !== 'Point' || !radius) continue
+    rasterizeRoute(geometry, grid, radius * (1 - CROSSING.lowVisibility) / scale, (i) => { lighting[i] = 1 })
+  }
+
   const female = new Float32Array(count)
   const child = new Float32Array(count)
   for (let i = 0; i < count; i++) {
@@ -507,7 +645,7 @@ export function buildRoutingCosts(
     const congestion = Math.max(nearbyStalls, stallCongestion[i]!)
     child[i] = 1.35 - widthBenefit + 2 * congestion + (conflicts[i] ? 4 : 0)
   }
-  return { walkable, stepFree, female, child }
+  return { walkable, stepFree, female, child, visualRisk, crossingSpeed }
 }
 
 // Priority queue for Dijkstra's algorithm

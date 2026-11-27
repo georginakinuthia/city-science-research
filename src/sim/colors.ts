@@ -92,3 +92,5 @@ export function makeGradientU32(c1: number, c2: number): (value: number, min: nu
   }
 }
 
+
+export const AGENT_RISK_COLORS = ['#ffffff', '#ff3b30', '#ff3b30'] as const

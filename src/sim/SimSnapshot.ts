@@ -21,6 +21,7 @@ export interface SimSnapshot {
   pedY: Float32Array
   pedHeading: Float32Array
   pedEngagementMode: Uint8Array
+  pedVisualRisk: Uint8Array
   pedStartNodeIdx: Int32Array
   pedIntimateViolations: Uint16Array
   pedPersonalViolations: Uint16Array
@@ -40,6 +41,7 @@ export function createEmptySnapshot(capacity: number): SimSnapshot {
     pedY: new Float32Array(capacity),
     pedHeading: new Float32Array(capacity),
     pedEngagementMode: new Uint8Array(capacity),
+    pedVisualRisk: new Uint8Array(capacity),
     pedStartNodeIdx: new Int32Array(capacity),
     pedIntimateViolations: new Uint16Array(capacity),
     pedPersonalViolations: new Uint16Array(capacity),

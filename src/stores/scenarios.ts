@@ -18,6 +18,7 @@ import {
   buildNodesFromCollection,
   computeNodeDistanceField,
   computeShortestPath,
+  enrichZebraCrossings,
   featureMask,
   polygonizeBlocks,
   type GridLike,
@@ -142,6 +143,12 @@ function coordinates(points: Feature<Point>[]): LonLat[] {
   return points.map(({ geometry }) => [geometry.coordinates[0]!, geometry.coordinates[1]!])
 }
 
+declare const __SCENARIO_FILES__: Record<string, string[]>
+
+function hasScenarioFile(folder: string, filename: string) {
+  return typeof __SCENARIO_FILES__ === 'undefined' || __SCENARIO_FILES__[folder]?.includes(filename)
+}
+
 class MissingScenarioFileError extends Error {}
 
 async function fetchLayerText(filename: string, accept: string): Promise<string> {
@@ -178,6 +185,9 @@ async function fetchScenarioLayer<T>(
   load: (filename: string) => Promise<T>,
   isEmpty: (data: T) => boolean,
 ): Promise<T> {
+  if (scenarioPath === 'scenarioB' && !hasScenarioFile(scenarioPath, filename)) {
+    return load(`/scenarioA/${filename}`)
+  }
   const request = load(`/${scenarioPath}/${filename}`)
   if (scenarioPath !== 'scenarioB') return request
   try {
@@ -199,6 +209,21 @@ const hasNoGeometry = (data: FeatureCollection<Geometry>) =>
 
 export function fetchScenarioGeoJSON(scenarioPath: string, filename: string) {
   return fetchScenarioLayer(scenarioPath, filename, fetchGeoJSON, hasNoGeometry)
+}
+
+export async function fetchOptionalMapLayer(
+  candidates: readonly (readonly [folder: string, filename: string])[],
+  load = fetchGeoJSON,
+): Promise<FeatureCollection<Geometry> | undefined> {
+  for (const [folder, filename] of candidates) {
+    if (!hasScenarioFile(folder, filename)) continue
+    try {
+      const data = await load(`/${folder}/${filename}`)
+      if (!hasNoGeometry(data)) return data
+    } catch (error) {
+      if (!(error instanceof MissingScenarioFileError)) throw error
+    }
+  }
 }
 
 type TransportRow = Record<string, string>
@@ -255,9 +280,12 @@ export async function loadScenario(
   loadTransport = fetchTransportRows,
 ): Promise<ScenarioData> {
   const layer = (filename: string) => fetchScenarioLayer(scenarioPath, filename, load, hasNoGeometry)
+  const optionalLayer = (filename: string) => fetchOptionalMapLayer(
+    scenarioPath === 'scenarioB' ? [[scenarioPath, filename], ['scenarioA', filename]] : [[scenarioPath, filename]], load,
+  )
   const [
     mainBuildings, extraBuildings, streets, buses, stalls, trees, blocks,
-    crime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary,
+    crime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary, streetLights, rawCrossings, scenarioStalls,
   ] = await Promise.all([
     layer('main_buildings.geojson'),
     layer('extra_buildings.geojson'),
@@ -273,6 +301,9 @@ export async function loadScenario(
     layer('metro_stations.geojson'),
     layer('bus_stops.geojson'),
     layer('study_boundary.geojson'),
+    optionalLayer('street_lights.geojson'),
+    optionalLayer('zebra_crossings.geojson'),
+    scenarioPath === 'scenarioB' ? fetchOptionalMapLayer([[scenarioPath, 'stalls.geojson']], load) : undefined,
   ])
 
   const transportById = new Map(transportRows.map((row) => [row.id, row]))
@@ -290,6 +321,15 @@ export async function loadScenario(
     type: 'FeatureCollection',
     features: [...mainBuildings.features, ...extraBuildings.features],
   }
+  const lights = streetLights ?? emptyCollection()
+  const zebraCrossings = enrichZebraCrossings(
+    rawCrossings ?? emptyCollection(), lights,
+    { type: 'FeatureCollection', features: [
+      ...stalls.features, ...(scenarioStalls?.features ?? []), ...structures.features, ...buses.features,
+    ] },
+    streets, crime,
+    { type: 'FeatureCollection', features: [...metro.features, ...busStops.features] },
+  )
   const area = studyArea(boundary, streets)
   const walkwayPoints = uniquePoints(walkwayAnchors(streets, area), 0.000008)
   const busPoints = uniquePoints(pointsInArea(busStops, area), 0.000015)
@@ -318,6 +358,8 @@ export async function loadScenario(
         busStops: { type: 'FeatureCollection', features: busPoints },
         crime,
         economicActivity,
+        streetLights: lights,
+        zebraCrossings,
       },
     },
   }

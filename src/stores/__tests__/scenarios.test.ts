@@ -7,6 +7,8 @@ import { ScenarioContainer } from '../../sim/scenarioGen'
 import {
   buildNodesFromCollection,
   buildPedestrianGrid,
+  buildRoutingCosts,
+  enrichZebraCrossings,
   computeNodeDistanceField,
   computeShortestPath,
   featureMask,
@@ -529,4 +531,41 @@ describe('pedestrian grid', () => {
     const distances = computeNodeDistanceField([7, 20], grid, data.walkable)
     expect(distances[cell(32, 20)]).toBeLessThan(Infinity)
   })
+})
+
+
+it('uses lamps for crossing visibility without coloring agents for poor lighting', () => {
+  const empty = featureCollection([])
+  const crossing = polygon([[[0, 0], [0.0001, 0], [0.0001, 0.00004], [0, 0.00004], [0, 0]]],
+    { id: null, width_m: '4', has_signal: '0' })
+  const lights = featureCollection([point([0.00004, 0.00002], { lit: 0, visibility_radius: 100 })])
+  const grid = {
+    width: 40, height: 20, metersPerCell: 1,
+    lonToX: (lon: number) => lon * 111_195 + 5,
+    latToY: (lat: number) => 10 - lat * 111_195,
+  }
+  const crossingCell = 8 * grid.width + 10
+  const run = (streetLights: typeof lights, crime: FeatureCollection<Geometry> = empty) => {
+    const zebraCrossings = enrichZebraCrossings(featureCollection([crossing]), streetLights,
+      empty, empty, crime, empty)
+    const routing = buildRoutingCosts({
+      transport: empty, walkways: empty,
+      pedestrian: {
+        streets: empty, blocks: empty, buses: empty, metro: empty, busStops: empty,
+        crime, economicActivity: empty, streetLights, zebraCrossings,
+      },
+    }, grid, new Uint8Array(grid.width * grid.height).fill(1), undefined)
+    return { props: zebraCrossings.features[0]!.properties, routing }
+  }
+  const dark = run(lights)
+  expect(dark.props).toMatchObject({ id: 1, width_m: 4, has_signal: 0, lit: 0, visibility: 0 })
+  expect(Object.values(dark.props).every(Number.isFinite)).toBe(true)
+  expect(dark.routing.crossingSpeed?.[crossingCell]).toBeLessThan(1)
+  expect(dark.routing.crossingSpeed?.[0]).toBe(1)
+  expect(dark.routing.visualRisk?.[crossingCell]).toBe(0)
+
+  const active = featureCollection([point([0.00004, 0.00002], { lit: 1, visibility_radius: 10 })])
+  expect(run(active).props.lit).toBe(1)
+  expect(run(active).routing.visualRisk?.[crossingCell]).toBe(0)
+  expect(run(active, featureCollection([point([0.00004, 0.00002])])).routing.visualRisk?.[crossingCell]).toBe(2)
 })
