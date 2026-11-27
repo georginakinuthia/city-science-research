@@ -33,6 +33,7 @@ import {
 } from '../config'
 import { type OrcaAgent, type OrcaParams, solveORCA } from '../models/orca'
 import { DemographicProfile, requiresStepFree } from '../stores/geo'
+import { applyPedestrianAxonometricSteering } from './axonometricPedestrianBehavior'
 
 import {
   type AdvanceResult,
@@ -655,6 +656,7 @@ function handleAmenity(
   maxDuration: number,
   stepDt: number,
   out: AmenityOut,
+  preserveOtherEngagement = false,
 ): void {
   out.hasGradient = false
   out.gradientDx = 0
@@ -706,7 +708,7 @@ function handleAmenity(
         out.speedFactor = ENGAGEMENT.weights.high.speed
         out.minutesSpent = timeSpent / 60
       }
-    } else {
+    } else if (!preserveOtherEngagement || sim.pedEngagementMode[i] === ENGAGEMENT_OFF) {
       const crowdingThreshold = ENGAGEMENT.crowdingThreshold
       const localDensity = getLocalDensity(sim, i)
       const crowdingDiscount = clamp01(1 - localDensity / crowdingThreshold)
@@ -740,21 +742,31 @@ function applyAmenityInfluences(
   stepDt: number,
 ): void {
   if (sim.pedNoEngagement[i] === 1) return
+  const cell = sim.pedCellIdx[i]!
+  const design = sim.axonometricPedestrianVariables
+  const existingPull = sim.routingCosts?.interventionDwellPull?.[cell] ?? 0
+
+  const stallApproach = design?.stallApproach
+  const approach = stallApproach?.[cell] ?? -1
+  const nearStalls = approach > -1
+  const restAtStalls = nearStalls && sim.pedEngagementMode[i] === ENGAGEMENT_WAITING
+    && (sim.furniturePotential[cell] ?? -1) < 0.55
 
   handleAmenity(
     sim,
     i,
-    sim.furniturePotential,
+    restAtStalls ? stallApproach! : sim.furniturePotential,
     ENGAGEMENT_WAITING,
     false,
     _p.spareTimeProbability,
     ENGAGEMENT.waitMaxMinutes,
     stepDt,
     _furnitureOut,
+    nearStalls,
   )
   if (_furnitureOut.hasGradient) {
     const dwell = sim.pedEngagementMode[i] === ENGAGEMENT_WAITING
-      ? sim.routingCosts?.interventionDwellPull?.[sim.pedCellIdx[i]!] ?? 0
+      ? design?.waitingPull[cell] ?? existingPull
       : 0
     state.heading = blendHeadingWithVector(
       state.heading,
@@ -765,31 +777,38 @@ function applyAmenityInfluences(
     state.speed = _furnitureOut.speedFactor * sim.pedSpeed[i]!
   }
   state.waitMinutes += _furnitureOut.minutesSpent
-  const hasFurniturePull = _furnitureOut.hasGradient
+  const waiting = sim.pedEngagementMode[i] === ENGAGEMENT_WAITING
+  if (restAtStalls && waiting && approach === 1) state.speed = 0
+  const hasFurniturePull = _furnitureOut.hasGradient && (!nearStalls || waiting)
+  const shoppingProbability = nearStalls
+    ? sim.pedShopProb[i]! > 0 ? _p.shoppingProbability * (1 + 0.075 * (approach + 1)) : 0
+    : _p.shoppingProbability
 
   handleAmenity(
     sim,
     i,
-    sim.stallPotential,
+    stallApproach ?? sim.stallPotential,
     ENGAGEMENT_SHOPPING,
     true,
-    _p.shoppingProbability,
+    shoppingProbability,
     ENGAGEMENT.shopMaxMinutes,
     stepDt,
     _stallsOut,
+    nearStalls,
   )
-  if (!hasFurniturePull && _stallsOut.hasGradient) {
-    const dwell = sim.pedEngagementMode[i] === ENGAGEMENT_SHOPPING
-      ? sim.routingCosts?.interventionDwellPull?.[sim.pedCellIdx[i]!] ?? 0
-      : 0
-    state.heading = blendHeadingWithVector(
-      state.heading,
-      _stallsOut.gradientDx,
-      _stallsOut.gradientDy,
-      _stallsOut.weight + (1 - _stallsOut.weight) * dwell,
-    )
-    state.speed = _stallsOut.speedFactor * sim.pedSpeed[i]!
+  const shopping = sim.pedEngagementMode[i] === ENGAGEMENT_SHOPPING
+  if (!hasFurniturePull && _stallsOut.hasGradient && (!restAtStalls || shopping)) {
+    const dwell = shopping ? design?.shoppingPull[cell] ?? existingPull : 0
+    const weight = nearStalls
+      ? shopping ? 0.52 + 0.16 * dwell : 0.08 * sim.pedShopProb[i]! * (approach + 1) / 2
+      : _stallsOut.weight + (1 - _stallsOut.weight) * dwell
+    const heading = blendHeadingWithVector(state.heading, _stallsOut.gradientDx, _stallsOut.gradientDy, weight)
+    if (!nearStalls || !wouldLeaveWalkable(sim, i, heading, 1)) {
+      state.heading = heading
+      state.speed = _stallsOut.speedFactor * sim.pedSpeed[i]!
+    }
   }
+  if (shopping && approach === 1) state.speed = 0
   state.shopMinutes += _stallsOut.minutesSpent
 }
 
@@ -953,9 +972,13 @@ const _orcaParams: OrcaParams = {
 const _orcaOut = { vx: 0, vy: 0 }
 
 function interventionSpeedScale(sim: Simulation, i: number): number {
-  return sim.pedEngagementMode[i] === ENGAGEMENT_OFF
+  const local = sim.pedEngagementMode[i] === ENGAGEMENT_OFF
     ? sim.routingCosts?.interventionSpeed?.[sim.pedCellIdx[i]!] ?? 1
     : 1
+  // Keep the relative benefit of improved routes within Scenario B's calmer pace.
+  return sim.axonometricPedestrianVariables
+    ? Math.max(0.72, Math.min(0.82, 0.78 * (1 + (local - 1) * 0.2)))
+    : local
 }
 
 function evaluateCollisions(
@@ -1121,11 +1144,18 @@ function calculateHeading(sim: Simulation, i: number, targetDist: number, stepDt
   state.shopMinutes = 0
   state.waitMinutes = 0
 
-  if (targetDist < _p.nearTargetRadius) return
+  if (targetDist < _p.nearTargetRadius) {
+    if (sim.axonometricPedestrianVariables) state.speed *= interventionSpeedScale(sim, i)
+    return
+  }
 
   applyAmenityInfluences(sim, i, state, stepDt)
   applySurfacePreferences(sim, i, state)
   applyFollowing(sim, i, state)
+  if (sim.pedEngagementMode[i] === ENGAGEMENT_OFF) {
+    const heading = applyPedestrianAxonometricSteering(sim.axonometricPedestrianVariables, cellIdx, state.heading, targetHeading)
+    if (heading !== state.heading && !wouldLeaveWalkable(sim, i, heading, 1)) state.heading = heading
+  }
 
   const baseMomentum = getEffectiveMomentum(sim, i)
   const smoothing = Math.min(baseMomentum, MOMENTUM.cap)

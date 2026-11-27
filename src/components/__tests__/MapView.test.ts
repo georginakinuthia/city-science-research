@@ -101,16 +101,40 @@ vi.mock('../../stores/models', () => ({ useModelsStore: () => models }))
 vi.mock('../../stores/scenarios', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../stores/scenarios')>(),
   useScenariosStore: () => scenarios,
+  fetchScenarioBStalls: async () => ({
+    type: 'FeatureCollection', features: [{
+      type: 'Feature', properties: {},
+      geometry: { type: 'Polygon', coordinates: [[[-99.188, 19.402], [-99.1879, 19.402],
+        [-99.1879, 19.4021], [-99.188, 19.402]]] },
+    }],
+  }),
   fetchOptionalMapLayer: async (candidates: [string, string][]) => {
     readLayer(candidates)
     const [folder, name] = candidates[0]!
-    const scenarioABuildings = folder === 'scenarioA' && name === 'extra_buildings.geojson'
-    const scenarioBGround = folder === 'scenarioB' && ['surfaces.geojson', 'shade.geojson', 'furniture.geojson'].includes(name)
-    if (scenarioABuildings || scenarioBGround) {
+    if (folder === 'scenarioA' && ['trees.geojson', 'bus_stops.geojson'].includes(name)) {
       return { type: 'FeatureCollection', features: [{
-        type: 'Feature', properties: { render_height: '9' },
-        geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] },
+        type: 'Feature', properties: {},
+        geometry: { type: 'Point', coordinates: [-99.188, 19.402] },
       }] }
+    }
+    const scenarioBuildings = name === 'extra_building1.geojson'
+    const scenarioBGround = folder === 'scenarioB' && ['surfaces.geojson', 'shade.geojson', 'furniture.geojson'].includes(name)
+    if (scenarioBuildings || scenarioBGround) {
+      return { type: 'FeatureCollection', features: [{
+        type: 'Feature', properties: { height: folder === 'scenarioB' ? 19 : null },
+        geometry: { type: 'Polygon', coordinates: [[[0, 0, 5], [1, 0, 5], [1, 1, 5], [0, 0, 5]]] },
+      }, ...(scenarioBuildings ? [
+        { type: 'Feature', properties: { height: '40' },
+          geometry: { type: 'LineString', coordinates: [[0, 0], [1, 0], [1, 1], [0, 0]] } },
+        { type: 'Feature', properties: { level: '3' },
+          geometry: { type: 'MultiLineString', coordinates: [
+            [[0, 0], [1, 0], [1, 1], [0, 0]], [[2, 0], [3, 0], [3, 1], [2, 0]],
+          ] } },
+        ...[4773, 6548].map((id) => ({
+          type: 'Feature', id, properties: {},
+          geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] },
+        })),
+      ] : [])] }
     }
   },
 }))
@@ -148,49 +172,71 @@ it('shares the restored camera, dark vector ground, and slate extrusions before 
       expect(map.layers.map(({ id }) => id)).toEqual(expect.arrayContaining([
         'background', 'road-casing', 'road-fill', 'street-labels',
         'buildings-extrusion', 'pedestrian-infrastructure-fill',
-        'surfaces-fill', 'shade-outline', 'furniture-outline',
       ]))
       expect(map.layers.some((layer) => layer.type === 'raster')).toBe(false)
       expect(map.getLayer('background')).toMatchObject({ paint: { 'background-color': '#0b0d12' } })
-      expect(map.layers.filter((layer) => layer.type === 'fill-extrusion').map(({ id }) => id))
+      expect(map.layers.filter((layer) => layer.type === 'fill-extrusion' && layer.source === 'src-buildings').map(({ id }) => id))
         .toEqual(['buildings-extrusion'])
       expect(map.layers.filter((layer) => 'source' in layer && layer.source === 'src-buildings')
         .map(({ type }) => type)).toEqual(['fill-extrusion'])
-      expect(map.getLayer('surfaces-outline')).toBeUndefined()
       expect(map.getLayer('crossings')).toBeUndefined()
       expect(map.getLayer('basemap-building-outline')).toBeUndefined()
       expect(map.layers.some(({ id }) => /^transport.types/.test(id))).toBe(false)
       expect(map.getLayer('buildings-extrusion')).toMatchObject({
         paint: {
-          'fill-extrusion-color': '#2e3440',
+          'fill-extrusion-color': '#191b1e',
           'fill-extrusion-base': 0,
-          'fill-extrusion-opacity': 0.78,
+          'fill-extrusion-opacity': 0.94,
           'fill-extrusion-vertical-gradient': true,
         },
       })
-      expect(map.getLayer('surfaces-fill')).toMatchObject({
-        paint: { 'fill-color': '#000000', 'fill-opacity': 0.25 },
-      })
-      expect(map.getLayer('shade-outline')).toMatchObject({
-        paint: { 'line-color': '#999997', 'line-opacity': 0.5 },
-      })
-      expect(map.getLayer('furniture-outline')).toMatchObject({
-        paint: { 'line-color': '#5076ff', 'line-opacity': 0.5 },
-      })
+      expect(map.getLayer('market-roof')).toBeUndefined()
+      expect(map.getLayer('buildings-roof-edges')).toMatchObject({ type: 'custom', renderingMode: '3d' })
       expect(map.options).toMatchObject({
         center: [-99.1868, 19.4042], zoom: 16.35, bearing: 22, pitch: 47, maxPitch: 75,
         style: {
-          light: { anchor: 'viewport', color: '#ffffff', intensity: 0.7, position: [1.5, 90, 65] } },
+          light: { anchor: 'viewport', color: '#ffffff', intensity: 0.62, position: [1.35, 215, 38] } },
       })
     }
   })
-  expect(maps[0]?.layers).toEqual(maps[1]?.layers)
-  expect(maps[0]?.getSource('src-buildings').data).toEqual(maps[1]?.getSource('src-buildings').data)
-  expect(maps[0]?.getSource('src-buildings').data.features[0].properties.render_height).toBe(9)
+  const [existing, proposed] = maps
+  for (const id of ['surfaces-fill', 'surfaces-outline', 'shade-outline', 'furniture-outline', 'stalls-extrusion']) {
+    expect(existing?.getLayer(id)).toBeUndefined()
+    expect(proposed?.getLayer(id)).toBeDefined()
+  }
+  expect(proposed?.getLayer('stalls-extrusion')).toMatchObject({
+    paint: { 'fill-extrusion-height': 3.1, 'fill-extrusion-color': '#191b1e', 'fill-extrusion-vertical-gradient': true },
+  })
+  expect(proposed?.getSource('src-stalls').data.features[0].geometry.type).toBe('Polygon')
+  expect(existing?.getLayer('src-trees-points')).toEqual(proposed?.getLayer('src-trees-points'))
+  expect(proposed?.getLayer('src-trees-points')).toMatchObject({
+    paint: { 'circle-radius': 2.6, 'circle-opacity': 0.22, 'circle-stroke-width': 0.6, 'circle-stroke-opacity': 0.35 },
+  })
+  expect(proposed?.getLayer('bus-markers')).toMatchObject({
+    type: 'fill', paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.6 },
+  })
+  const marker = proposed?.getSource('src-bus-markers').data.features[0].geometry
+  expect(marker.type).toBe('Polygon')
+  expect(marker.coordinates[0]).toHaveLength(5)
+  expect(marker.coordinates[0][0]).toEqual(marker.coordinates[0][4])
+  const [[west, south], [east], [, north]] = marker.coordinates[0]
+  expect((east - west) * 111_320 * Math.cos(19.402 * Math.PI / 180)).toBeCloseTo(2.2, 3)
+  expect((north - south) * 111_320).toBeCloseTo(2.2, 3)
+  expect(maps[1]?.getSource('src-buildings').data.features[0].properties.renderHeight).toBe(19)
+  const footprints = maps[0]?.getSource('src-buildings').data.features
+  expect(footprints.map(({ geometry }: { geometry: { type: string } }) => geometry.type))
+    .toEqual(['Polygon', 'Polygon', 'MultiPolygon', 'Polygon'])
+  expect(footprints[0].geometry.coordinates[0][0]).toEqual([0, 0])
+  expect(footprints.map(({ properties }: { properties: unknown }) => properties)).toMatchObject([
+    { renderHeight: 14, minHeight: 0 }, { renderHeight: 26, minHeight: 0 }, { renderHeight: 10.5, minHeight: 0 },
+    { marketHall: true, renderHeight: 6, minHeight: 0 },
+  ])
   const reads = readLayer.mock.calls.flatMap(([candidates]) => candidates)
   expect(new Set(reads.map(([folder]) => folder))).toEqual(new Set(['scenarioA', 'scenarioB']))
+  expect(reads.filter(([, file]) => file === 'extra_building1.geojson').map(([folder]) => folder))
+    .toEqual(['scenarioA', 'scenarioB'])
   expect(reads.map(([, file]) => file)).not.toContain('streets.geojson')
-  for (const hiddenFile of ['transport_types.geojson', 'main_buildings.geojson', 'structures.geojson',
+  for (const hiddenFile of ['transport_types.geojson', 'extra_buildings.geojson', 'extra_building.geojson', 'main_buildings.geojson', 'structures.geojson',
     'publicspace.geojson', 'zebra_crossings.geojson']) {
     expect(reads.map(([, file]) => file)).not.toContain(hiddenFile)
   }
@@ -200,7 +246,7 @@ it('shares the restored camera, dark vector ground, and slate extrusions before 
   expect(validateStyleMin({
     ...map.options.style,
     sources: { ...map.options.style.sources, ...Object.fromEntries(map.sources) },
-    layers: map.layers,
+    layers: map.layers.filter((layer) => layer.type !== 'custom'),
   }).map(({ message }) => message)).toEqual([])
 
   const buildings = map.layers.find((layer) => layer.type === 'fill-extrusion')
@@ -210,14 +256,7 @@ it('shares the restored camera, dark vector ground, and slate extrusions before 
   if (height.result !== 'success' || base.result !== 'success') throw new Error('Invalid extrusion paint')
   const evaluateHeight = (properties: Record<string, unknown>) =>
     height.value.evaluate({ zoom: 16.35 }, { type: 'Polygon', properties })
-  expect(evaluateHeight({ height: 18 })).toBe(18)
-  expect(evaluateHeight({ height: '40' })).toBe(40)
-  expect(evaluateHeight({ height: 0, render_height: '9' })).toBe(9)
-  expect(evaluateHeight({ levels: '3' })).toBe(10.5)
-  expect(evaluateHeight({ num_floors: 2 })).toBe(7)
-  for (const properties of [{}, { height: 0 }, { height: null }, { height: 'invalid' }, { height: -10 }]) {
-    expect(evaluateHeight(properties)).toBe(12)
-  }
+  expect(evaluateHeight({ renderHeight: 14 })).toBe(14)
   expect(base.value.evaluate({ zoom: 16.35 }, {
     type: 'Polygon', properties: { height: 9, min_height: 12 },
   })).toBe(0)

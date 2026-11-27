@@ -45,7 +45,7 @@ onMounted(async () => {
         panel.renderer?.attach()
         const loaded = await assets
         if (disposed || generation !== styleGeneration) return
-        addTacubayaMapAssets(map, loaded)
+        addTacubayaMapAssets(map, loaded[index] ?? [])
         mapStore.applyLayerVisibility(map)
         await scenariosReady
         if (disposed || generation !== styleGeneration) return

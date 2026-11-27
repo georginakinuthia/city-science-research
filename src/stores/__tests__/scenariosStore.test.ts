@@ -37,7 +37,7 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
   const files = new Map<string, FeatureCollection>([
     ['/scenarioA/main_buildings.geojson', featureCollection([point(outside)])],
     ['/scenarioA/publicspace.geojson', featureCollection([boundary])],
-    ['/scenarioA/extra_buildings.geojson', featureCollection([boundary])],
+    ['/scenarioA/extra_building1.geojson', featureCollection([boundary])],
     ['/scenarioA/streets.geojson', walkways],
     ['/scenarioA/buses.geojson', empty],
     ['/scenarioA/tacubaya_stalls.geojson', featureCollection([boundary])],
@@ -78,6 +78,7 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
   expect(store.scenarioA?.stalls.features).toHaveLength(1)
   expect(store.scenarioB?.stalls).toBe(store.scenarioA?.stalls)
   expect(store.scenarioB?.structures.features).toEqual([boundary])
+  expect(fetch.mock.calls.some(([url]) => url.pathname === '/scenarioB/extra_building1.geojson')).toBe(true)
   expect(store.scenarioB?.surfaces.features).toEqual([])
   expect(store.scenarioB?.routing?.studyBoundary).toEqual(featureCollection([boundary]))
   expect(store.scenarioA?.routing?.interventionZones).toBeUndefined()
@@ -106,4 +107,17 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
     expect(fetch.mock.calls.some(([url]) => url.pathname === `/scenarioB/${file}.geojson`)).toBe(true)
   }
   expect(fetch.mock.calls.some(([url]) => url.pathname === '/scenarioA/shade.geojson')).toBe(false)
+
+  const newStalls = featureCollection([point(inside, { id: 'new-bay' })])
+  files.set('/scenarioB/newstalls.geojson', newStalls)
+  files.set('/scenarioB/stalls.geojson', featureCollection([point(inside, { id: 'legacy' })]))
+  const proposedStore = useScenariosStore(createPinia())
+  await proposedStore.loadScenarios()
+
+  expect(proposedStore.scenarioB?.stalls).toEqual(newStalls)
+  expect(proposedStore.scenarioA?.stalls.features).toEqual([boundary])
+  expect(proposedStore.scenarioB?.routing?.interventionZones?.features)
+    .toEqual(expect.arrayContaining([expect.objectContaining({
+      properties: expect.objectContaining({ category: 'market_organized' }),
+    })]))
 })

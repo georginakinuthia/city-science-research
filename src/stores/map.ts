@@ -4,10 +4,11 @@ import { computed, reactive, ref, shallowRef } from 'vue'
 import { TACUBAYA_CAMERA, type TacubayaLegendLayer } from '../config'
 
 const legendLayers: Record<TacubayaLegendLayer, string[]> = {
-  stalls: ['stalls', 'stalls-fill', 'stalls-points'],
+  stalls: ['stalls', 'stalls-fill', 'stalls-points', 'stalls-extrusion'],
   pedestrian_infrastructure: ['pedestrian-infrastructure-fill', 'src-walkway2-line'],
   crime: ['crime-halo'],
   trees: ['src-trees-points'],
+  buses: ['bus-markers'],
 }
 
 export interface MapBounds {
@@ -39,7 +40,7 @@ export const useMapStore = defineStore('map', () => {
   const hasBothMaps = computed(() => !!mapA.value && !!mapB.value)
 
   const layerVisibility = reactive<Record<TacubayaLegendLayer, boolean>>({
-    stalls: true, pedestrian_infrastructure: true, crime: true, trees: true,
+    stalls: true, pedestrian_infrastructure: true, crime: true, trees: true, buses: true,
   })
 
   function applyLayerVisibility(map: any) {

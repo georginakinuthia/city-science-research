@@ -11,7 +11,7 @@ import type {
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref } from 'vue'
 
-import { TACUBAYA_CROWD } from '../config'
+import { TACUBAYA_BUILDING_FILE, TACUBAYA_CROWD } from '../config'
 import { classifyInterventionFeature, interventionSpineAxis, type InterventionZones } from '../sim/scenarioBInterventions'
 import { ScenarioContainer } from '../sim/scenarioGen'
 import type { CrowdAnchors, NodeState, ScenarioData } from './geo'
@@ -217,9 +217,10 @@ export function fetchScenarioGeoJSON(scenarioPath: string, filename: string) {
 export async function fetchOptionalMapLayer(
   candidates: readonly (readonly [folder: string, filename: string])[],
   load = fetchGeoJSON,
+  { checkManifest = true } = {},
 ): Promise<FeatureCollection<Geometry> | undefined> {
   for (const [folder, filename] of candidates) {
-    if (!hasScenarioFile(folder, filename)) continue
+    if (checkManifest && !hasScenarioFile(folder, filename)) continue
     try {
       const data = await load(`/${folder}/${filename}`)
       if (!hasNoGeometry(data)) return data
@@ -227,6 +228,15 @@ export async function fetchOptionalMapLayer(
       if (!(error instanceof MissingScenarioFileError)) throw error
     }
   }
+}
+
+const SCENARIO_B_STALL_FILES = [
+  ['scenarioB', 'newstalls.geojson'], ['scenarioB', 'stalls.geojson'],
+] as const
+
+export function fetchScenarioBStalls(load = fetchGeoJSON) {
+  // The dev server's asset manifest can predate a newly exported GeoJSON file.
+  return fetchOptionalMapLayer(SCENARIO_B_STALL_FILES, load, { checkManifest: false })
 }
 
 type TransportRow = Record<string, string>
@@ -311,11 +321,11 @@ export async function loadScenario(
   const isInterventionScenario = scenarioPath === 'scenarioB'
   const localLayer = (filename: string) => fetchOptionalMapLayer([[scenarioPath, filename]], load)
   const [
-    extraBuildings, streets, buses, stalls, trees, blocks,
+    structures, streets, buses, stalls, trees, blocks,
     reportedCrime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary, streetLights,
     rawCrossings, scenarioStalls, explicitInterventions, publicSpace, plazaConnections, seating, canopy, landscaping, upgradedLights, upgradedCrossings,
   ] = await Promise.all([
-    layer('extra_buildings.geojson'),
+    layer(TACUBAYA_BUILDING_FILE),
     layer('streets.geojson'),
     layer('buses.geojson'),
     layer('tacubaya_stalls.geojson'),
@@ -330,7 +340,7 @@ export async function loadScenario(
     layer('study_boundary.geojson'),
     optionalLayer('street_lights.geojson'),
     optionalLayer('zebra_crossings.geojson'),
-    isInterventionScenario ? localLayer('stalls.geojson') : undefined,
+    isInterventionScenario ? fetchScenarioBStalls(load) : undefined,
     isInterventionScenario ? localLayer('interventions.geojson') : undefined,
     isInterventionScenario ? localLayer('surfaces.geojson') : undefined,
     isInterventionScenario ? optionalLayer('publicspace.geojson') : undefined,
@@ -357,16 +367,24 @@ export async function loadScenario(
       },
     })),
   }
-  const structures = extraBuildings
   const area = studyArea(boundary, streets)
   const interventionZones = isInterventionScenario
     ? createInterventionZones(explicitInterventions,
       [
         ['surfaces', publicSpace], ['crossings', plazaConnections], ['seating', seating],
-        ['stalls', scenarioStalls], ['canopy', canopy], ['landscaping', landscaping], ['bus bays', buses],
+        ['canopy', canopy], ['landscaping', landscaping], ['bus bays', buses],
         ['street lights', upgradedLights], ['crossings', upgradedCrossings],
       ], area)
     : undefined
+  if (interventionZones && scenarioStalls) {
+    interventionZones.features.push(...createInterventionZones(undefined, [['stalls', scenarioStalls]], area).features)
+  }
+  const dwellZones = interventionZones?.features.filter(({ properties }) =>
+    properties.category === 'community_canopy' || properties.category === 'active_recreation',
+  ) ?? []
+  const dwellPoints = dwellZones.length
+    ? uniquePoints(pointsInArea({ type: 'FeatureCollection', features: dwellZones }, area), 0.000035)
+    : []
   const crime = interventionZones ? applyCrimeInterventions(reportedCrime, interventionZones) : reportedCrime
   const lights = streetLights ?? emptyCollection()
   const zebraCrossings = enrichZebraCrossings(
@@ -392,11 +410,11 @@ export async function loadScenario(
   }
 
   return {
-    furniture: seating ?? emptyCollection(),
+    furniture: { type: 'FeatureCollection', features: [...(seating?.features ?? []), ...dwellPoints] },
     stalls: scenarioStalls ?? stalls,
     structures,
     surfaces: emptyCollection(),
-    shade: trees,
+    shade: canopy ?? trees,
     routing: {
       transport,
       walkways: emptyCollection(),

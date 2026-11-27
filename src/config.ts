@@ -26,6 +26,8 @@ export const TIMING = {
 
 export const MAX_AGENTS = 800
 
+export const TACUBAYA_BUILDING_FILE = 'extra_building1.geojson'
+
 export const TACUBAYA_CAMERA = {
   center: [-99.1868, 19.4042] as [number, number],
   zoom: 16.35,
@@ -207,6 +209,7 @@ export const TACUBAYA_LEGEND = [
   { id: 'pedestrian_infrastructure', label: 'Pedestrian infrastructure', color: '#94a3b8' },
   { id: 'crime', label: 'Crime spots', color: '#ec4899' },
   { id: 'trees', label: 'Trees', color: '#6b7280' },
+  { id: 'buses', label: 'Buses', color: '#38bdf8' },
 ] as const
 export type TacubayaLegendLayer = (typeof TACUBAYA_LEGEND)[number]['id']
 export const CRIME_PROXIMITY_METERS = 15

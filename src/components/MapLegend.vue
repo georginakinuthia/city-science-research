@@ -10,7 +10,8 @@ const mapStore = useMapStore()
     <li v-for="item in TACUBAYA_LEGEND" :key="item.id">
       <button type="button" class="legend-item" :aria-pressed="mapStore.layerVisibility[item.id]"
         @click="mapStore.toggleLayer(item.id)">
-        <span class="legend-swatch" aria-hidden="true" :style="{ borderColor: item.color }"></span>
+        <span class="legend-swatch" :class="{ 'bus-swatch': item.id === 'buses' }" aria-hidden="true"
+          :style="{ borderColor: item.color, backgroundColor: item.id === 'buses' ? item.color : undefined }"></span>
         {{ item.label }}
       </button>
     </li>
@@ -37,5 +38,10 @@ const mapStore = useMapStore()
 
 .legend-swatch {
   @apply inline-block size-2.5 rounded-sm border-2;
+}
+
+.bus-swatch {
+  @apply size-1 rounded-none border-0;
+  opacity: 0.60;
 }
 </style>

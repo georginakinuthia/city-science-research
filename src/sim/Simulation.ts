@@ -32,6 +32,7 @@ import {
   type RoutingCosts,
   type RoutingData,
 } from '../stores/geo'
+import { computeAxonometricPedestrianVariables } from './axonometricPedestrianBehavior'
 import type { ScenarioContainer } from './scenarioGen'
 
 // Pure per-agent functions. Module-scoped params are installed via
@@ -177,6 +178,7 @@ export class Simulation {
    */
   readonly nodeDistanceFields: Float32Array[] = []
   routingCosts?: RoutingCosts
+  axonometricPedestrianVariables: ReturnType<typeof computeAxonometricPedestrianVariables>
   private initialCrowd?: InitialCrowd
   private readonly femaleDistanceFields: Float32Array[] = []
   private readonly childDistanceFields: Float32Array[] = []
@@ -679,6 +681,9 @@ export class Simulation {
     scenario.generatePotentials(this)
     scenario.generateNodeDistanceFields(this, routing?.crowd ? [] : sharedNodes, Boolean(routing?.crowd))
     this.routingCosts = scenario.routingCosts
+    this.axonometricPedestrianVariables = computeAxonometricPedestrianVariables(
+      routing?.interventionZones, this, this.routingCosts?.walkable, this.metersPerCell, scenario.stalls,
+    )
     this.nodeDistanceFields.length = 0
     this.femaleDistanceFields.length = 0
     this.childDistanceFields.length = 0

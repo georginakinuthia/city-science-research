@@ -17,8 +17,9 @@ import {
   recomputeAgentParams,
   setBehaviorParams,
 } from '../agentBehavior'
+import { computeAxonometricPedestrianVariables } from '../axonometricPedestrianBehavior'
 import { ScenarioContainer } from '../scenarioGen'
-import { ENGAGEMENT_WAITING, Simulation } from '../Simulation'
+import { ENGAGEMENT_SHOPPING, ENGAGEMENT_WAITING, Simulation } from '../Simulation'
 
 function collection(...features: Feature<Geometry>[]): FeatureCollection<Geometry> {
   return { type: 'FeatureCollection', features }
@@ -240,6 +241,14 @@ describe('demographic routing', () => {
     expect(sim.pedCurrentSpeed[i]).toBeCloseTo(1.24)
     expect(sim.pedCellIdx[i]).not.toBeLessThan(0)
     expect(sim.advanceResult.distanceTraveled).toBeCloseTo(1.24 * createDefaultBehaviorParams().baseDeltaTime)
+
+    sim.setAgentPosition(i, start.worldX!, start.worldY!)
+    sim.pedCurrentSpeed[i] = 1
+    sim.axonometricPedestrianVariables = computeAxonometricPedestrianVariables(
+      { type: 'FeatureCollection', features: [] }, sim, sim.routingCosts!.walkable, sim.metersPerCell,
+    )
+    advanceAgent(sim, i, sim.advanceResult)
+    expect(sim.pedCurrentSpeed[i]).toBeCloseTo(0.81744, 4)
   })
 
   it('strengthens steering toward mapped waiting space for agents already dwelling', () => {
@@ -265,6 +274,45 @@ describe('demographic routing', () => {
     }
 
     expect(displacement(0.4)).toBeGreaterThan(displacement(0))
+  })
+
+  it('steers a Scenario B shopper to the walkable stall frontage and pauses there', () => {
+    setBehaviorParams({
+      ...createDefaultBehaviorParams(), debugMomentumEnabled: false, debugOrcaEnabled: false,
+      shoppingProbability: 0, spareTimeProbability: 0,
+    })
+    const { sim, setBarrier } = buildSimulation()
+    const start = { ...node('start', 7, 11), noEngagement: false }
+    const target = node('target', 19, 11)
+    setBarrier(0, [start, target])
+    const xy = (x: number, y: number): Position => [sim.xToLon(x), sim.yToLat(y)]
+    const stalls = collection({
+      type: 'Feature', properties: { category: 'market_organized' },
+      geometry: { type: 'Polygon', coordinates: [[xy(5.6, 5.6), xy(10.4, 5.6), xy(10.4, 8.4), xy(5.6, 8.4), xy(5.6, 5.6)]] },
+    })
+    sim.axonometricPedestrianVariables = computeAxonometricPedestrianVariables(
+      { type: 'FeatureCollection', features: [] }, sim, sim.routingCosts!.walkable, sim.metersPerCell, stalls,
+    )
+    const frontage = sim.cellAt(7, 9)
+    const approach = sim.axonometricPedestrianVariables!.stallApproach!
+    expect(approach[frontage]).toBe(1)
+    expect(approach[sim.cellAt(7, 7)]).toBe(-1)
+    expect(approach[sim.cellAt(22, 21)]).toBe(-1)
+
+    const i = sim.spawnAgent()
+    initialiseAgent(sim, i, start, target, 0, 0)
+    sim.pedProfile[i] = DemographicProfile.standard
+    sim.pedEngagementMode[i] = ENGAGEMENT_SHOPPING
+    sim.pedEngagementDuration[i] = 10
+    sim.pedSpeed[i] = sim.pedCurrentSpeed[i] = 1
+    advanceAgent(sim, i, sim.advanceResult)
+    expect(sim.pedY[i]).toBeLessThan(11)
+
+    sim.setAgentPosition(i, 7, 9)
+    advanceAgent(sim, i, sim.advanceResult)
+    expect(sim.pedCurrentSpeed[i]).toBe(0)
+    expect(sim.pedCellIdx[i]).toBe(frontage)
+    expect(sim.advanceResult.shopMinutes).toBeGreaterThan(0)
   })
 
   it('colors only for high local density or crime proximity', () => {

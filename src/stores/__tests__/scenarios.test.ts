@@ -1,3 +1,4 @@
+import { applyPedestrianAxonometricSteering, computeAxonometricPedestrianVariables } from '../../sim/axonometricPedestrianBehavior'
 import { featureCollection, lineString, multiLineString, point, polygon } from '@turf/turf'
 import { classifyInterventionFeature, interventionSpineAxis, type InterventionZones } from '../../sim/scenarioBInterventions'
 import type { FeatureCollection, Geometry } from 'geojson'
@@ -624,6 +625,14 @@ it('models less crime exposure and more walkable capacity only near intervention
   expect(b.interventionAxisY?.[cell(15, 20)]).toBe(0)
   expect(b.interventionRouteBonus?.[cell(20, 20)]).toBeCloseTo(0.45)
   expect(b.interventionDwellPull?.[cell(20, 20)]).toBe(0)
+  const design = computeAxonometricPedestrianVariables(interventionZones, grid, walkable)
+  expect(design?.waitingPull[cell(15, 20)]).toBeCloseTo(0.4)
+  expect(design?.waitingPull[cell(20, 20)]).toBe(0)
+  expect(design?.linearity[cell(15, 21)]).toBe(0)
+  expect(applyPedestrianAxonometricSteering(design, cell(20, 20), 60, 90)).toBeGreaterThan(60)
+  expect(applyPedestrianAxonometricSteering(design, cell(20, 20), 300, 270)).toBeLessThan(300)
+  expect(applyPedestrianAxonometricSteering(design, cell(20, 20), 0, 0)).toBe(0)
+  expect(applyPedestrianAxonometricSteering(undefined, cell(20, 20), 60, 90)).toBe(60)
   expect(b.interventionSpeed?.[cell(65, 20)]).toBe(1)
   expect(b.crowdCapacity?.[cell(15, 21)]).toBe(1)
   expect(b.crowdCapacity?.[cell(65, 20)]).toBe(1)

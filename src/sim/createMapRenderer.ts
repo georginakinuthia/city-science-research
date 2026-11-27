@@ -1,18 +1,19 @@
-import type { Feature, FeatureCollection, Geometry } from 'geojson'
+import type { Feature, FeatureCollection, Geometry, Polygon, Position } from 'geojson'
 import type { ExpressionSpecification, FillExtrusionLayerSpecification, FilterSpecification, GeoJSONSource, LayerSpecification, Map as MapLibreMap, StyleSpecification } from 'maplibre-gl'
 
 import { ACCENT, DARKEST, LIGHT } from '../assets/palette'
-import { TACUBAYA_LEGEND } from '../config'
+import { TACUBAYA_BUILDING_FILE, TACUBAYA_LEGEND } from '../config'
+import { createTacubayaBuildingEdges, tacubayaMarket, TACUBAYA_MARKET_PART_IDS } from '../rendering/TacubayaBuildings'
 import { toMarkerPoints } from '../stores/geo'
-import { fetchOptionalMapLayer } from '../stores/scenarios'
+import { fetchOptionalMapLayer, fetchScenarioBStalls } from '../stores/scenarios'
 
 const BACKGROUND = '#0b0d12'
 const BASEMAP_SOURCE = 'basemap-vector'
 const MAPTILER_KEY = 'go6pmAvswrTZcAQVPQcy'
-const [stalls, infrastructure, , trees] = TACUBAYA_LEGEND
+const [stalls, infrastructure, , trees, busLegend] = TACUBAYA_LEGEND
 
 export const TACUBAYA_LIGHT: NonNullable<StyleSpecification['light']> = {
-  anchor: 'viewport', color: '#ffffff', intensity: 0.7, position: [1.5, 90, 65],
+  anchor: 'viewport', color: '#ffffff', intensity: 0.62, position: [1.35, 215, 38],
 }
 
 const excludeTransit: ExpressionSpecification = ['!', ['in', ['get', 'class'], ['literal',
@@ -30,21 +31,12 @@ const roadFilter: FilterSpecification = ['all',
   excludePedestrianPaths,
 ]
 
-const numberProperty = (key: string): ExpressionSpecification => ['to-number', ['get', key], 0]
-const height = numberProperty('height')
-const renderHeight = numberProperty('render_height')
-const levels = ['max', numberProperty('levels'), numberProperty('num_floors')] satisfies ExpressionSpecification
-const buildingHeight: ExpressionSpecification = ['case',
-  ['>', height, 0], height,
-  ['>', renderHeight, 0], renderHeight,
-  ['>', levels, 0], ['*', levels, 3.5],
-  12,
-]
+const BUILDING_COLOR = '#191b1e'
 const buildingPaint: FillExtrusionLayerSpecification['paint'] = {
-  'fill-extrusion-color': '#2e3440',
-  'fill-extrusion-height': buildingHeight,
+  'fill-extrusion-color': BUILDING_COLOR,
+  'fill-extrusion-height': ['get', 'renderHeight'],
   'fill-extrusion-base': 0,
-  'fill-extrusion-opacity': 0.78,
+  'fill-extrusion-opacity': 0.94,
   'fill-extrusion-vertical-gradient': true,
 }
 
@@ -67,7 +59,7 @@ export function createTacubayaBasemap(): StyleSpecification {
       {
         id: 'road-fill', type: 'line', source: BASEMAP_SOURCE, 'source-layer': 'transportation',
         filter: roadFilter, layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': '#1e222b', 'line-opacity': 1,
+        paint: { 'line-color': '#161a22', 'line-opacity': 1,
           'line-width': ['interpolate', ['linear'], ['zoom'], 14, 0.7, 17, 2.5, 20, 10] },
       },
       {
@@ -109,57 +101,106 @@ function combine(inputs: (Collection | undefined)[]): Collection {
   })))
 }
 
-function buildingProperties(feature: Feature): Feature['properties'] {
-  const properties = { ...feature.properties }
-  for (const key of ['height', 'render_height', 'levels', 'num_floors']) {
-    const value = properties[key]
-    const parsed = typeof value === 'number' || (typeof value === 'string' && value.trim())
-      ? Number(value) : NaN
-    if (Number.isFinite(parsed) && parsed >= 0) properties[key] = parsed
-    else delete properties[key]
+function busMarkerSquares(data: Collection): FeatureCollection<Polygon> {
+  const metersPerDegree = 111_320
+  const halfSide = 1.1 / metersPerDegree
+  return {
+    type: 'FeatureCollection',
+    features: toMarkerPoints(data).features.map(({ geometry: { coordinates: [lng, lat] }, properties }) => {
+      const x = lng!, y = lat!
+      const halfWidth = halfSide / Math.cos(y * Math.PI / 180)
+      const west = x - halfWidth, east = x + halfWidth
+      const south = y - halfSide, north = y + halfSide
+      return {
+        type: 'Feature', properties,
+        geometry: { type: 'Polygon', coordinates: [[[west, south], [east, south],
+          [east, north], [west, north], [west, south]]] },
+      }
+    }),
   }
-  return properties
 }
 
-export async function loadTacubayaMapAssets(): Promise<MapAsset[]> {
+function closedFootprint(ring: Position[]): boolean {
+  const first = ring[0]
+  const last = ring.at(-1)
+  return ring.length >= 4 && first !== undefined && last !== undefined
+    && first[0] === last[0] && first[1] === last[1]
+    && new Set(ring.map(([x, y]) => `${x},${y}`)).size >= 3
+}
+
+function normalizeBuilding(feature: Feature): Feature[] {
+  let { geometry } = feature
+  if (geometry?.type === 'LineString' || geometry?.type === 'MultiLineString') {
+    const lines = geometry.type === 'LineString' ? [geometry.coordinates] : geometry.coordinates
+    const footprints = lines.filter(closedFootprint)
+    if (!footprints.length) return []
+    geometry = footprints.length === 1
+      ? { type: 'Polygon', coordinates: [footprints[0]!] }
+      : { type: 'MultiPolygon', coordinates: footprints.map((ring) => [ring]) }
+  }
+  if (geometry?.type !== 'Polygon' && geometry?.type !== 'MultiPolygon') return []
+
+  const stripZ = (ring: Position[]) => ring.map(([x, y]): Position => [x!, y!])
+  geometry = geometry.type === 'Polygon'
+    ? { type: 'Polygon', coordinates: geometry.coordinates.map(stripZ) }
+    : { type: 'MultiPolygon', coordinates: geometry.coordinates.map((polygon) => polygon.map(stripZ)) }
+
+  const properties = feature.properties ?? {}
+  const numeric = (value: unknown) => typeof value === 'number' || typeof value === 'string'
+    ? Number(value) : NaN
+  const height = numeric(properties.height)
+  const levelHeight = [properties.levels, properties.level, properties.num_floors]
+    .map((value) => numeric(value) * 3.5)
+    .find((value) => Number.isFinite(value) && value > 2)
+  const candidate = Number.isFinite(height) && height > 2 ? height : (levelHeight ?? 14)
+  return [{
+    ...feature, geometry,
+    properties: { ...properties, renderHeight: Math.max(3, Math.min(26, candidate)), minHeight: 0 },
+  }]
+}
+
+export async function loadTacubayaMapAssets(): Promise<readonly [MapAsset[], MapAsset[]]> {
   const merge = async (...names: string[]) => combine(await Promise.all(
     ['scenarioA', 'scenarioB'].flatMap((folder) =>
       names.map((name) => fetchOptionalMapLayer([[folder, `${name}.geojson`]]))),
   ))
-  const [buildings, perimeter, stallData, paths, treeData, surfaces, shade, furniture,
+  const [buildingsA, buildingsB, perimeter, stallData, proposedStalls, paths, treeData, surfaces, shade, furniture,
     lights, metro, buses, activity] = await Promise.all([
-    fetchOptionalMapLayer([['scenarioA', 'extra_buildings.geojson']]),
+    fetchOptionalMapLayer([['scenarioA', TACUBAYA_BUILDING_FILE]]),
+    fetchOptionalMapLayer([['scenarioB', TACUBAYA_BUILDING_FILE]]),
     merge('study_boundary', 'boundary'),
-    merge('tacubaya_stalls', 'stalls'),
+    fetchOptionalMapLayer([['scenarioA', 'tacubaya_stalls.geojson']]),
+    fetchScenarioBStalls(),
     merge('pedestrian_infrastructure'),
     merge('trees'),
-    merge('surfaces'),
-    merge('shade'),
-    merge('furniture'),
+    fetchOptionalMapLayer([['scenarioB', 'surfaces.geojson']]),
+    fetchOptionalMapLayer([['scenarioB', 'shade.geojson']]),
+    fetchOptionalMapLayer([['scenarioB', 'furniture.geojson']]),
     merge('street_lights'),
     merge('metro_stations'),
     merge('buses', 'bus_stops'),
     merge('economic_activity2'),
   ])
 
-  return [
-    { id: 'surfaces', data: surfaces, belowRoads: true, layers: [{
+  const treeCanopies = collection(shade?.features.filter((feature) => feature.properties?.eq_dia != null))
+  const builtShade = collection(shade?.features.filter((feature) => feature.properties?.eq_dia == null))
+  const ground: MapAsset[] = [
+    { id: 'surfaces', data: surfaces ?? collection(), belowRoads: true, layers: [{
       id: 'surfaces-fill', type: 'fill', source: 'src-surfaces', filter: polygonFilter,
-      paint: { 'fill-color': DARKEST, 'fill-opacity': 0.25 },
+      paint: { 'fill-color': '#64748b', 'fill-opacity': 0.10 },
+    }, {
+      id: 'surfaces-outline', type: 'line', source: 'src-surfaces', filter: polygonFilter,
+      paint: { 'line-color': '#94a3b8', 'line-width': 0.6, 'line-opacity': 0.24 },
     }] },
-    { id: 'shade', data: shade, belowRoads: true, layers: [{
+    { id: 'shade', data: builtShade, belowRoads: true, layers: [{
       id: 'shade', type: 'fill', source: 'src-shade', filter: polygonFilter,
       paint: { 'fill-color': LIGHT, 'fill-opacity': 0.08 },
     }, {
       id: 'shade-outline', type: 'line', source: 'src-shade', filter: polygonFilter,
-      paint: { 'line-color': LIGHT, 'line-width': 1.5, 'line-opacity': 0.5 },
+      paint: { 'line-color': LIGHT, 'line-width': 0.7, 'line-opacity': 0.25 },
     }] },
-    { id: 'buildings', data: collection((buildings?.features ?? []).map((feature) => ({
-      ...feature, properties: buildingProperties(feature),
-    }))), layers: [{
-      id: 'buildings-extrusion', type: 'fill-extrusion', source: 'src-buildings',
-      filter: polygonFilter, paint: buildingPaint,
-    }] },
+  ]
+  const overlays: MapAsset[] = [
     { id: 'study_boundary', data: perimeter ?? collection(), layers: [{
       id: 'study-boundary', type: 'line', source: 'src-study_boundary',
       paint: { 'line-color': '#e2e8f0', 'line-width': 1.5, 'line-opacity': 0.9 },
@@ -175,7 +216,7 @@ export async function loadTacubayaMapAssets(): Promise<MapAsset[]> {
           1, 'rgba(255, 55, 55, 0.88)'],
       },
     }] },
-    { id: stalls.id, data: stallData, layers: [{
+    { id: stalls.id, data: stallData ?? collection(), layers: [{
       id: 'stalls-fill', type: 'fill', source: 'src-stalls', filter: polygonFilter,
       paint: { 'fill-color': stalls.color, 'fill-opacity': 0.2 },
     }, {
@@ -197,11 +238,12 @@ export async function loadTacubayaMapAssets(): Promise<MapAsset[]> {
     { id: trees.id, data: toMarkerPoints(treeData ?? collection()), layers: [{
       id: 'src-trees-points', type: 'circle', source: 'src-trees',
       paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 2, 17, 3.2],
-        'circle-color': 'transparent',
+        'circle-radius': 2.6,
+        'circle-color': '#6b7280',
+        'circle-opacity': 0.22,
         'circle-stroke-color': '#6b7280',
-        'circle-stroke-width': 1,
-        'circle-stroke-opacity': 0.6,
+        'circle-stroke-width': 0.6,
+        'circle-stroke-opacity': 0.35,
       },
     }] },
     { id: 'metro', data: metro, layers: [{
@@ -215,9 +257,12 @@ export async function loadTacubayaMapAssets(): Promise<MapAsset[]> {
       paint: { 'circle-color': '#334155', 'circle-radius': 2.5, 'circle-opacity': 0.55,
         'circle-stroke-color': '#64748b', 'circle-stroke-width': 1, 'circle-stroke-opacity': 0.55 },
     }] },
+    { id: 'bus-markers', data: busMarkerSquares(buses), layers: [{
+      id: 'bus-markers', type: 'fill', source: 'src-bus-markers', filter: polygonFilter,
+      paint: { 'fill-color': busLegend.color, 'fill-opacity': 0.60 },
+    }] },
     ...[
       { id: 'street-lights', data: lights, color: '#94a3b8', radius: 1.5, opacity: 0.55 },
-      { id: 'bus-markers', data: buses, color: '#38bdf8', radius: 2.5, opacity: 0.75 },
       { id: 'economic-activity', data: activity, color: '#6b7280', radius: 1.5, opacity: 0.45 },
     ].map(({ id, data, color, radius, opacity }): MapAsset => ({
       id, data: toMarkerPoints(data), layers: [{
@@ -225,15 +270,43 @@ export async function loadTacubayaMapAssets(): Promise<MapAsset[]> {
         paint: { 'circle-color': color, 'circle-radius': radius, 'circle-opacity': opacity },
       }],
     })),
-    { id: 'furniture', data: furniture, layers: [{
+    { id: 'furniture', data: furniture ?? collection(), layers: [{
       id: 'furniture-outline', type: 'line', source: 'src-furniture',
       filter: ['any', polygonFilter, lineFilter],
-      paint: { 'line-color': ACCENT, 'line-width': 2, 'line-opacity': 0.5 },
+      paint: { 'line-color': '#8b95a8', 'line-width': 0.65, 'line-opacity': 0.3 },
     }, {
       id: 'src-furniture-points', type: 'circle', source: 'src-furniture', filter: pointFilter,
       paint: { 'circle-color': ACCENT, 'circle-radius': 1.8, 'circle-opacity': 0.5 },
     }] },
   ]
+  const withBuildings = (buildings: Collection | undefined, proposed: boolean): MapAsset[] => [
+    ...(proposed ? ground : []),
+    { id: 'buildings', data: collection(
+      (buildings?.features ?? []).flatMap((feature) => {
+        const id = feature.id ?? feature.properties?.fid
+        if (!TACUBAYA_MARKET_PART_IDS.has(id)) return normalizeBuilding(feature)
+        return id === tacubayaMarket.id ? normalizeBuilding(tacubayaMarket) : []
+      }),
+    ), layers: [{
+      id: 'buildings-extrusion', type: 'fill-extrusion', source: 'src-buildings',
+      filter: polygonFilter, paint: buildingPaint,
+    }] },
+    ...overlays.filter((asset) => proposed || asset.id !== 'furniture').map((asset): MapAsset => {
+      if (proposed && asset.id === trees.id && treeCanopies.features.length) {
+        return { ...asset, data: combine([asset.data, toMarkerPoints(treeCanopies)]) }
+      }
+      if (!proposed || asset.id !== stalls.id || !proposedStalls) return asset
+      return { ...asset, data: proposedStalls, layers: [
+        { id: 'stalls-extrusion', type: 'fill-extrusion', source: 'src-stalls', filter: polygonFilter,
+          paint: { ...buildingPaint, 'fill-extrusion-height': 3.1 } },
+        { id: 'stalls', type: 'line', source: 'src-stalls', filter: ['any', polygonFilter, lineFilter],
+          paint: { 'line-color': '#737985', 'line-width': 0.85, 'line-opacity': 0.52 } },
+        { id: 'stalls-points', type: 'circle', source: 'src-stalls', filter: pointFilter,
+          paint: { 'circle-color': BUILDING_COLOR, 'circle-radius': 1.5, 'circle-opacity': 0.55 } },
+      ] }
+    }),
+  ]
+  return [withBuildings(buildingsA, false), withBuildings(buildingsB ?? buildingsA, true)]
 }
 
 export function addTacubayaMapAssets(map: MapLibreMap, assets: MapAsset[]): void {
@@ -243,6 +316,9 @@ export function addTacubayaMapAssets(map: MapLibreMap, assets: MapAsset[]): void
     for (const layer of layers) {
       if (!map.getLayer(layer.id)) map.addLayer(layer, belowRoads ? 'road-casing' : 'street-labels')
     }
+    if (id === 'buildings' && !map.getLayer('buildings-roof-edges')) {
+      map.addLayer(createTacubayaBuildingEdges(data), 'street-labels')
+    }
   }
 }
 
@@ -250,7 +326,9 @@ export function addTacubayaInterventions(map: MapLibreMap, zones: Collection | u
   if (!zones?.features.length) return
   addTacubayaMapAssets(map, [{
     id: 'interventions', data: zones, belowRoads: true, layers: [{
-      id: 'intervention-areas', type: 'fill', source: 'src-interventions', filter: polygonFilter,
+      id: 'intervention-areas', type: 'fill', source: 'src-interventions',
+      filter: ['all', polygonFilter, ['!=', ['get', 'category'], 'transit_wayfinding'],
+        ['!=', ['get', 'category'], 'street_lighting']],
       paint: {
         'fill-color': ['match', ['get', 'category'],
           'shared_access_spine', '#5e8a82',
