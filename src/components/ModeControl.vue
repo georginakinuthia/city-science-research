@@ -192,7 +192,7 @@ const chartOptions = {
     <AccordionContent class="accordion-content">
       <div class="accordion-child">
         <div class="accordion-child-pairing">
-          <div class="accordion-child-left accordion-heading">Time Budgets</div>
+          <div class="accordion-child-left accordion-heading">Stop Frequency</div>
           <button
             class="accordion-child-right btn"
             title="Reset to defaults"
@@ -241,6 +241,14 @@ const chartOptions = {
           </SliderTrack>
           <SliderThumb class="slider-thumb" aria-label="Resting" />
         </SliderRoot>
+      </div>
+
+      <div class="accordion-child description-text">
+        <p class="description-intro">
+          Shopping adjusts the chance of stopping at stalls, including Scenario B’s organized bays.
+          Resting adjusts the chance of pausing at seating and other waiting spaces.
+          Crowding makes either stop less likely.
+        </p>
       </div>
 
       <Separator class="separator" />

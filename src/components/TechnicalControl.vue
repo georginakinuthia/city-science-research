@@ -57,9 +57,18 @@ const appMode = inject('appMode')
             method that yields smooth, reciprocal lateral avoidance rather than stop-and-wait
             behaviour
             <span class="description-cite">(van den Berg et al., 2011)</span>.
-            ORCA is applied as the final step of each agent's update, so its output is
-            never overridden by higher-level route preferences. Static obstacles&mdash;stalls
-            and walls&mdash;are enforced as hard constraints.
+            The model checks the resulting movement against walkable space and accessibility
+            constraints before accepting each step.
+          </p>
+
+          <h3 class="description-heading">Scenario B and Agent Colour</h3>
+          <p class="description-paragraph">
+            Scenario B favours straight movement along shared access and transit links.
+            Shopping and waiting can draw agents toward off-spine destinations. The model
+            represents Crime Prevention Through Environmental Design (CPTED) by reducing
+            mapped crime risk and increasing pedestrian capacity in treated areas.
+            Agents are white by default and turn red only near mapped crime risk or when
+            experiencing congestion. These are simulated conditions.
           </p>
 
           <h3 class="description-heading">References</h3>

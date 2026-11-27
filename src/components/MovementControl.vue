@@ -304,10 +304,8 @@ const publicLabelB = computed(() => publicLabel(modelBStats.value))
         </SliderRoot>
         <div class="description-text">
           <p class="description-intro">
-            Controls heterogeneity in route choice and walking behaviour across the agent
-            population. At 0%, every agent follows the same utility-maximising path. At
-            higher values, per-agent weights are perturbed stochastically, producing varied
-            trajectories and more realistic emergent crowd patterns.
+            Adjusts how much route-choice preferences vary among pedestrians. Scenario B’s
+            shared-access alignment continues to guide through trips at every setting.
           </p>
         </div>
       </div>
@@ -332,10 +330,8 @@ const publicLabelB = computed(() => publicLabel(modelBStats.value))
         </SliderRoot>
         <div class="description-text">
           <p class="description-intro">
-            Minimum comfortable separation between agents. The default of 0.90 m lies within
-            the far phase of Hall's (1966) personal distance zone (0.76–1.22 m); pedestrians
-            in dense public settings typically tolerate distances at or below this
-            interpersonal range. ORCA derives each agent's safety radius from this value.
+            Preferred separation between pedestrians, in metres. The collision-avoidance
+            model uses this setting when agents pass each other in open and crowded areas.
           </p>
         </div>
       </div>
@@ -360,10 +356,8 @@ const publicLabelB = computed(() => publicLabel(modelBStats.value))
         </SliderRoot>
         <div class="description-text">
           <p class="description-intro">
-            Free-flow walking speed in the absence of crowd effects. The default of 1.34 m/s
-            corresponds to the mean value reported in Weidmann's (1993) review of empirical
-            pedestrian studies. Speed decreases automatically in denser areas through
-            Weidmann's speed–density relationship.
+            Baseline free-flow pace before crowding and crossing effects. Scenario B applies
+            a calmer walking pace while retaining its corridor guidance.
           </p>
         </div>
       </div>

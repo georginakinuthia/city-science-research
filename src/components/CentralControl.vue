@@ -30,17 +30,13 @@ const accordionValue = ref('overview')
         <div class="accordion-child">
           <div class="description-text">
             <p class="description-paragraph">
-              This simulation models pedestrian movement through Mexico City's Tacubaya transit hub.
-              Two urban design scenarios run side by side, allowing direct comparison of how changes
-              to sidewalk widths, vendor stalls, step-free access, and shaded canopies improve
-              safety and walking speeds for vulnerable commuters—including women, caregivers,
-              elderly, and disabled pedestrians.
+              Scenario A models the existing Plaza Tacubaya transit hub in Mexico City. Scenario B
+              tests a redesign with more direct walking routes and places to stop away from the
+              main pedestrian flow.
             </p>
             <p class="description-paragraph mb-0">
-              The model is necessarily a simplification of real behaviour. Because the same
-              assumptions apply to both sides, the meaningful signal is the difference between
-              scenarios rather than the absolute values. Compare the two panels to gauge how design
-              choices may play out.
+              Compare both panels under the same control settings. The model estimates how the
+              redesign may affect walking, crowding, and exposure to mapped crime risk.
             </p>
           </div>
         </div>
