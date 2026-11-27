@@ -22,13 +22,13 @@ const mapStore = useMapStore()
 
 .map-legend {
   @apply absolute bottom-3 left-3 right-10 z-10 flex w-fit
-         flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md border border-white/10
-         bg-darkest/90 px-2.5 py-1.5 text-[11px] leading-tight text-lighter;
+         flex-wrap items-center gap-x-3 gap-y-1 rounded-xl
+         bg-dark px-3 py-1.5 text-[11px] leading-tight text-lighter;
   max-width: calc(100% - 3.25rem);
 }
 
 .legend-item {
-  @apply flex cursor-pointer items-center gap-1 whitespace-nowrap;
+  @apply flex cursor-pointer items-center gap-1.5 whitespace-nowrap;
 }
 
 .legend-item[aria-pressed='false'] {
@@ -36,6 +36,6 @@ const mapStore = useMapStore()
 }
 
 .legend-swatch {
-  @apply inline-block size-2 rounded-xs border;
+  @apply inline-block size-2.5 rounded-sm border-2;
 }
 </style>

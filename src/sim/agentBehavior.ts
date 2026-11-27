@@ -235,6 +235,7 @@ function getLocalDensityAt(
   radius: number,
 ): number {
   const density = sim.density
+  const capacity = sim.routingCosts?.crowdCapacity
   const width = sim.width
   const height = sim.height
   let count = 0
@@ -246,7 +247,7 @@ function getLocalDensityAt(
       const nx = patchX + dx
       if (nx < 0 || nx >= width) continue
       const ni = ny * width + nx
-      count += density[ni]!
+      count += density[ni]! / (capacity?.[ni] ?? 1)
       cells++
     }
   }
@@ -273,6 +274,7 @@ function getDirectionalDensity(
   _densityOut.oncoming = 0
   _densityOut.areal = 0
   const density = sim.density
+  const capacity = sim.routingCosts?.crowdCapacity
   const hdx = sim.cellHeadingDx
   const hdy = sim.cellHeadingDy
   const width = sim.width
@@ -296,7 +298,7 @@ function getDirectionalDensity(
       if (count === 0) continue
       const rawDot = -(hdx[idx]! * dirX + hdy[idx]! * dirY)
       const perAgent = rawDot / count
-      oncoming += count * Math.max(ROUTE_CHOICE.coDirectionalFloor, perAgent)
+      oncoming += count * Math.max(ROUTE_CHOICE.coDirectionalFloor, perAgent) / (capacity?.[idx] ?? 1)
     }
   }
   _densityOut.oncoming = oncoming
@@ -354,6 +356,8 @@ const candAreal = new Float64Array(MAX_CANDIDATES)
 const candObstacle = new Float64Array(MAX_CANDIDATES)
 const candShade = new Float64Array(MAX_CANDIDATES)
 const candRouteCost = new Float64Array(MAX_CANDIDATES)
+const candInterventionBonus = new Float64Array(MAX_CANDIDATES)
+const candSpineAlignment = new Float64Array(MAX_CANDIDATES)
 const candJitterHash = new Int32Array(MAX_CANDIDATES)
 const candUtilities = new Float64Array(MAX_CANDIDATES)
 
@@ -450,6 +454,12 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
     candObstacle[candCount] = obstacle
     candShade[candCount] = shade
     candRouteCost[candCount] = pathCost
+    const bonus = routing?.interventionRouteBonus?.[nIdx] ?? 0
+    const axisX = routing?.interventionAxisX?.[nIdx] ?? 0
+    const axisY = routing?.interventionAxisY?.[nIdx] ?? 0
+    const spineAlignment = Math.abs(axisX * ndx + axisY * ndy)
+    candSpineAlignment[candCount] = spineAlignment
+    candInterventionBonus[candCount] = axisX || axisY ? bonus * (0.5 + 0.5 * spineAlignment) : bonus
     candJitterHash[candCount] =
       fnv1aHash3(agentId, Math.round(nx * 1000) >>> 0, Math.round(ny * 1000) >>> 0) | 0
     candCount++
@@ -483,7 +493,8 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
         beta.shade * candShade[k]! +
         biasWeight * biasDot -
         3 * (candRouteCost[k]! - minRouteCost) +
-        jitter * jitterScale
+        jitter * jitterScale +
+        candInterventionBonus[k]!
 
       candUtilities[k] = V
       if (V > maxU) {
@@ -492,7 +503,8 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
       }
     }
 
-    if (stepFree) {
+    // On mapped spines, follow the selected downhill lane instead of averaging it with diagonal turns.
+    if (stepFree || candSpineAlignment[bestCandidate]! >= 0.92) {
       sim.pedPerceivedDensity[i] = candAreal[bestCandidate]!
       return radToCompassDeg(Math.atan2(-candNdy[bestCandidate]!, candNdx[bestCandidate]!))
     }
@@ -514,8 +526,12 @@ function getTargetHeading(sim: Simulation, i: number, _stepDt: number = _p.baseD
       blendedY /= totalWeight
       sim.pedPerceivedDensity[i] = blendedDensity / totalWeight
 
-      const rad = Math.atan2(-blendedY, blendedX)
-      return radToCompassDeg(rad)
+      const heading = radToCompassDeg(Math.atan2(-blendedY, blendedX))
+      if (routing && (blendedX ** 2 + blendedY ** 2 < 0.01 || wouldLeaveWalkable(sim, i, heading, 1))) {
+        sim.pedPerceivedDensity[i] = candAreal[bestCandidate]!
+        return radToCompassDeg(Math.atan2(-candNdy[bestCandidate]!, candNdx[bestCandidate]!))
+      }
+      return heading
     }
   }
 
@@ -737,11 +753,14 @@ function applyAmenityInfluences(
     _furnitureOut,
   )
   if (_furnitureOut.hasGradient) {
+    const dwell = sim.pedEngagementMode[i] === ENGAGEMENT_WAITING
+      ? sim.routingCosts?.interventionDwellPull?.[sim.pedCellIdx[i]!] ?? 0
+      : 0
     state.heading = blendHeadingWithVector(
       state.heading,
       _furnitureOut.gradientDx,
       _furnitureOut.gradientDy,
-      _furnitureOut.weight,
+      _furnitureOut.weight + (1 - _furnitureOut.weight) * dwell,
     )
     state.speed = _furnitureOut.speedFactor * sim.pedSpeed[i]!
   }
@@ -760,11 +779,14 @@ function applyAmenityInfluences(
     _stallsOut,
   )
   if (!hasFurniturePull && _stallsOut.hasGradient) {
+    const dwell = sim.pedEngagementMode[i] === ENGAGEMENT_SHOPPING
+      ? sim.routingCosts?.interventionDwellPull?.[sim.pedCellIdx[i]!] ?? 0
+      : 0
     state.heading = blendHeadingWithVector(
       state.heading,
       _stallsOut.gradientDx,
       _stallsOut.gradientDy,
-      _stallsOut.weight,
+      _stallsOut.weight + (1 - _stallsOut.weight) * dwell,
     )
     state.speed = _stallsOut.speedFactor * sim.pedSpeed[i]!
   }
@@ -930,6 +952,12 @@ const _orcaParams: OrcaParams = {
 }
 const _orcaOut = { vx: 0, vy: 0 }
 
+function interventionSpeedScale(sim: Simulation, i: number): number {
+  return sim.pedEngagementMode[i] === ENGAGEMENT_OFF
+    ? sim.routingCosts?.interventionSpeed?.[sim.pedCellIdx[i]!] ?? 1
+    : 1
+}
+
 function evaluateCollisions(
   sim: Simulation,
   i: number,
@@ -951,7 +979,8 @@ function evaluateCollisions(
   _orcaParams.neighborDist = ORCA_CONFIG.neighborDist
   _orcaParams.headOnBias = 0
 
-  const speed = sim.pedCurrentSpeed[i]! || sim.pedSpeed[i]! || 0
+  const currentSpeed = sim.pedCurrentSpeed[i]!
+  const speed = sim.routingCosts ? currentSpeed : currentSpeed || sim.pedSpeed[i]! || 0
   const theta = compassDegToRad(sim.pedHeading[i]!)
   _selfOrca.id = sim.pedId[i]!
   _selfOrca.x = sim.pedX[i]!
@@ -959,7 +988,7 @@ function evaluateCollisions(
   _selfOrca.vx = Math.cos(theta) * speed
   _selfOrca.vy = -Math.sin(theta) * speed
   _selfOrca.radius = agentRadius
-  _selfOrca.maxSpeed = sim.pedSpeed[i]!
+  _selfOrca.maxSpeed = sim.pedSpeed[i]! * interventionSpeedScale(sim, i)
 
   const neighbors = sim.spatialHash.queryNearest(
     sim.pedX[i]!,
@@ -1105,7 +1134,7 @@ function calculateHeading(sim: Simulation, i: number, targetDist: number, stepDt
     state.heading = blendAngles(state.heading, prev, smoothing)
   }
 
-  state.speed *= computeSpeedFactor(sim, i)
+  state.speed *= computeSpeedFactor(sim, i) * interventionSpeedScale(sim, i)
 
   applyAvoidance(sim, i, state, stepDt)
 
@@ -1196,7 +1225,11 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
       ? sim.pedSpeed[i]!
       : 0
   const crossingFactor = sim.routingCosts?.crossingSpeed?.[cellIdx] ?? 1
-  const safeSpeed = (Number.isFinite(speedMs) ? speedMs : fallbackSpeed) * crossingFactor
+  const desiredSpeed = (Number.isFinite(speedMs) ? speedMs : fallbackSpeed) * crossingFactor
+  // Limit acceleration out of queues, while allowing immediate braking at obstacles.
+  const safeSpeed = sim.routingCosts
+    ? Math.max(0, Math.min(desiredSpeed, sim.pedSpeed[i]! * interventionSpeedScale(sim, i), Math.max(0, fallbackSpeed) + 1.5 * stepDt))
+    : desiredSpeed
 
   sim.setAgentHeading(i, safeHeading)
   sim.pedCurrentSpeed[i] = safeSpeed
@@ -1215,6 +1248,7 @@ export function advanceAgent(sim: Simulation, i: number, out: AdvanceResult): vo
         : !isPathClear(sim, tx, ty, sim.pedX[i]!, sim.pedY[i]!))
     if (pathBlocked) {
       sim.setAgentPosition(i, tx, ty)
+      if (sim.routingCosts) sim.pedCurrentSpeed[i] = 0
       if (sim.routingCosts && sim.pedEngagementMode[i] === ENGAGEMENT_OFF) {
         out.distanceTraveled = recoverBlockedStep(sim, i, tx, ty, stepCells, stepFree) * metersPerCell
         sim.pedCurrentSpeed[i] = out.distanceTraveled / stepDt

@@ -48,8 +48,10 @@ const { maps, models, scenarios, simulation, snapshots, render, readLayer, TestM
       return this.layers.find((layer) => layer.id === id)
     }
 
-    addSource(id: string, source: unknown) {
-      this.sources.set(id, source)
+    addSource(id: string, source: { data: unknown }) {
+      const entry = { ...source }
+      Object.defineProperty(entry, 'setData', { value: (data: unknown) => { entry.data = data } })
+      this.sources.set(id, entry)
     }
 
     addLayer(layer: LayerSpecification | CustomLayerInterface, before?: string) {
@@ -102,7 +104,9 @@ vi.mock('../../stores/scenarios', async (importOriginal) => ({
   fetchOptionalMapLayer: async (candidates: [string, string][]) => {
     readLayer(candidates)
     const [folder, name] = candidates[0]!
-    if (folder === 'scenarioA' && name === 'extra_buildings.geojson') {
+    const scenarioABuildings = folder === 'scenarioA' && name === 'extra_buildings.geojson'
+    const scenarioBGround = folder === 'scenarioB' && ['surfaces.geojson', 'shade.geojson', 'furniture.geojson'].includes(name)
+    if (scenarioABuildings || scenarioBGround) {
       return { type: 'FeatureCollection', features: [{
         type: 'Feature', properties: { render_height: '9' },
         geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] },
@@ -122,6 +126,8 @@ let host: HTMLElement
 beforeEach(() => {
   maps.length = 0
   snapshots.callback = undefined
+  Object.assign(scenarios.scenarioA, { routing: undefined })
+  Object.assign(scenarios.scenarioB, { routing: undefined })
   vi.clearAllMocks()
   host = document.createElement('div')
   app = createApp(MapView).use(createPinia())
@@ -132,28 +138,49 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it('shares the specified camera and static Scenario A layers before the worker is ready', async () => {
+it('shares the restored camera, dark vector ground, and slate extrusions before the worker is ready', async () => {
   scenarios.loadScenarios.mockReturnValue(new Promise(() => {}))
   app.mount(host)
 
   await vi.waitFor(() => {
     expect(maps).toHaveLength(2)
-    const ids = maps[0]!.layers.map(({ id }) => id)
-    expect(ids.indexOf('satellite-imagery')).toBeLessThan(ids.indexOf('road-casing'))
     for (const map of maps) {
       expect(map.layers.map(({ id }) => id)).toEqual(expect.arrayContaining([
-        'background', 'satellite-imagery', 'road-casing', 'road-fill', 'street-labels', 'basemap_vector_building',
+        'background', 'road-casing', 'road-fill', 'street-labels',
         'buildings-extrusion', 'pedestrian-infrastructure-fill',
+        'surfaces-fill', 'shade-outline', 'furniture-outline',
       ]))
-      expect(map.layers.filter((layer) => 'source' in layer &&
-        (layer.source === 'src-buildings' || ('source-layer' in layer && layer['source-layer'] === 'building')),
-      ).map((layer) => layer.type)).toEqual(['fill-extrusion', 'fill-extrusion'])
-      expect(map.layers.some(({ id }) => /^(metro|transit|transport.types)/.test(id))).toBe(false)
+      expect(map.layers.some((layer) => layer.type === 'raster')).toBe(false)
+      expect(map.getLayer('background')).toMatchObject({ paint: { 'background-color': '#0b0d12' } })
+      expect(map.layers.filter((layer) => layer.type === 'fill-extrusion').map(({ id }) => id))
+        .toEqual(['buildings-extrusion'])
+      expect(map.layers.filter((layer) => 'source' in layer && layer.source === 'src-buildings')
+        .map(({ type }) => type)).toEqual(['fill-extrusion'])
+      expect(map.getLayer('surfaces-outline')).toBeUndefined()
+      expect(map.getLayer('crossings')).toBeUndefined()
+      expect(map.getLayer('basemap-building-outline')).toBeUndefined()
+      expect(map.layers.some(({ id }) => /^transport.types/.test(id))).toBe(false)
+      expect(map.getLayer('buildings-extrusion')).toMatchObject({
+        paint: {
+          'fill-extrusion-color': '#2e3440',
+          'fill-extrusion-base': 0,
+          'fill-extrusion-opacity': 0.78,
+          'fill-extrusion-vertical-gradient': true,
+        },
+      })
+      expect(map.getLayer('surfaces-fill')).toMatchObject({
+        paint: { 'fill-color': '#000000', 'fill-opacity': 0.25 },
+      })
+      expect(map.getLayer('shade-outline')).toMatchObject({
+        paint: { 'line-color': '#999997', 'line-opacity': 0.5 },
+      })
+      expect(map.getLayer('furniture-outline')).toMatchObject({
+        paint: { 'line-color': '#5076ff', 'line-opacity': 0.5 },
+      })
       expect(map.options).toMatchObject({
         center: [-99.1868, 19.4042], zoom: 16.35, bearing: 22, pitch: 47, maxPitch: 75,
         style: {
-          sources: { 'basemap-satellite': { type: 'raster', tileSize: 512, maxzoom: 22 } },
-          light: { anchor: 'viewport', color: '#ffffff', intensity: 0.75, position: [1.5, 90, 65] } },
+          light: { anchor: 'viewport', color: '#ffffff', intensity: 0.7, position: [1.5, 90, 65] } },
       })
     }
   })
@@ -161,10 +188,13 @@ it('shares the specified camera and static Scenario A layers before the worker i
   expect(maps[0]?.getSource('src-buildings').data).toEqual(maps[1]?.getSource('src-buildings').data)
   expect(maps[0]?.getSource('src-buildings').data.features[0].properties.render_height).toBe(9)
   const reads = readLayer.mock.calls.flatMap(([candidates]) => candidates)
-  expect(reads.every(([folder]) => folder === 'scenarioA')).toBe(true)
+  expect(new Set(reads.map(([folder]) => folder))).toEqual(new Set(['scenarioA', 'scenarioB']))
   expect(reads.map(([, file]) => file)).not.toContain('streets.geojson')
-  expect(reads.map(([, file]) => file)).not.toContain('transport_types.geojson')
-  expect(reads.some(([, file]) => ['metro_stations.geojson', 'bus_stops.geojson', 'buses.geojson'].includes(file))).toBe(false)
+  for (const hiddenFile of ['transport_types.geojson', 'main_buildings.geojson', 'structures.geojson',
+    'publicspace.geojson', 'zebra_crossings.geojson']) {
+    expect(reads.map(([, file]) => file)).not.toContain(hiddenFile)
+  }
+  expect(reads.some(([, file]) => ['metro_stations.geojson', 'bus_stops.geojson', 'buses.geojson'].includes(file))).toBe(true)
   expect(reads.map(([, file]) => file)).not.toContain('blocks.geojson')
   const map = maps[1]!
   expect(validateStyleMin({
@@ -174,19 +204,23 @@ it('shares the specified camera and static Scenario A layers before the worker i
   }).map(({ message }) => message)).toEqual([])
 
   const buildings = map.layers.find((layer) => layer.type === 'fill-extrusion')
-  if (buildings?.type !== 'fill-extrusion') throw new Error('Missing basemap building extrusions')
+  if (buildings?.type !== 'fill-extrusion') throw new Error('Missing extra building extrusions')
   const height = createExpression(buildings.paint?.['fill-extrusion-height'])
   const base = createExpression(buildings.paint?.['fill-extrusion-base'])
   if (height.result !== 'success' || base.result !== 'success') throw new Error('Invalid extrusion paint')
   const evaluateHeight = (properties: Record<string, unknown>) =>
     height.value.evaluate({ zoom: 16.35 }, { type: 'Polygon', properties })
   expect(evaluateHeight({ height: 18 })).toBe(18)
+  expect(evaluateHeight({ height: '40' })).toBe(40)
   expect(evaluateHeight({ height: 0, render_height: '9' })).toBe(9)
-  expect(evaluateHeight({ levels: 3 })).toBe(10.5)
-  expect(evaluateHeight({ height: 0 })).toBe(12)
+  expect(evaluateHeight({ levels: '3' })).toBe(10.5)
+  expect(evaluateHeight({ num_floors: 2 })).toBe(7)
+  for (const properties of [{}, { height: 0 }, { height: null }, { height: 'invalid' }, { height: -10 }]) {
+    expect(evaluateHeight(properties)).toBe(12)
+  }
   expect(base.value.evaluate({ zoom: 16.35 }, {
     type: 'Polygon', properties: { height: 9, min_height: 12 },
-  })).toBe(8)
+  })).toBe(0)
 
   map.jumpTo({ center: [-99.185, 19.404], zoom: 17, pitch: 54, bearing: 95 })
   expect(maps[0]?.state).toEqual(map.state)
@@ -198,7 +232,42 @@ it('shares the specified camera and static Scenario A layers before the worker i
   expect(models.initModel).not.toHaveBeenCalled()
 })
 
-it('projects the paused snapshot into the Three.js core and halo in screen pixels', async () => {
+it('assigns per-scenario crime weights and draws mapped intervention fills only in B', async () => {
+  const crime = (weight: number) => ({
+    type: 'FeatureCollection',
+    features: [{
+      type: 'Feature', geometry: { type: 'Point', coordinates: [-99.19, 19.4] },
+      properties: { crimeWeight: weight },
+    }],
+  })
+  Object.assign(scenarios.scenarioA, { routing: { pedestrian: { crime: crime(1) } } })
+  const interventionZones = {
+    type: 'FeatureCollection',
+    features: [{
+      type: 'Feature', properties: { category: 'shared_access_spine' },
+      geometry: { type: 'Polygon', coordinates: [[[-99.19, 19.4], [-99.189, 19.4], [-99.189, 19.401], [-99.19, 19.4]]] },
+    }],
+  }
+  Object.assign(scenarios.scenarioB, { routing: { pedestrian: { crime: crime(0.2) }, interventionZones } })
+  scenarios.loadScenarios.mockResolvedValue(undefined)
+  models.initModel.mockReturnValue(new Promise(() => {}))
+  app.mount(host)
+
+  await vi.waitFor(() => {
+    expect(maps[0]?.getSource('src-crime')?.data).toEqual(crime(1))
+    expect(maps[1]?.getSource('src-crime')?.data).toEqual(crime(0.2))
+    expect(maps[0]?.getLayer('intervention-areas')).toBeUndefined()
+    expect(maps[1]?.getSource('src-interventions')?.data).toEqual(interventionZones)
+    expect(maps[1]?.getLayer('intervention-areas')).toMatchObject({
+      type: 'fill', paint: { 'fill-opacity': 0.08, 'fill-antialias': false },
+    })
+    const ids = maps[1]!.layers.map(({ id }) => id)
+    expect(ids.indexOf('background')).toBeLessThan(ids.indexOf('intervention-areas'))
+    expect(ids.indexOf('intervention-areas')).toBeLessThan(ids.indexOf('road-casing'))
+  })
+})
+
+it('projects the paused snapshot into a Three.js pinpoint and glow pass', async () => {
   const model = {
     pedX: new Float32Array([40]),
     pedY: new Float32Array([20]),
@@ -216,23 +285,33 @@ it('projects the paused snapshot into the Three.js core and halo in screen pixel
   const layer = map.getLayer('agents') as CustomLayerInterface
   const gl = {} as WebGL2RenderingContext
   layer.onAdd?.(map as never, gl)
-  layer.render(gl, {} as never)
+  const projection = { defaultProjectionData: { mainMatrix: new Float64Array(16) } }
+  layer.render(gl, projection as never)
   const scene = render.mock.lastCall?.[0] as Scene
-  const [halo, core] = scene.children as Points<never, ShaderMaterial>[]
-  expect(halo?.material.uniforms.diameter?.value).toBe(16.8)
-  expect(halo?.material.uniforms.opacity?.value).toBe(0.28)
-  expect(core?.material.uniforms.diameter?.value).toBe(10)
-  expect(core?.material.uniforms.coreRatio?.value).toBeCloseTo(0.64)
-  const geometry = (scene.children[1] as Points).geometry
+  expect(scene.children).toHaveLength(2)
+  const [halo, core] = scene.children as Points<Points['geometry'], ShaderMaterial>[]
+  expect(halo?.material.uniforms.diameter?.value).toBe(14)
+  expect(halo?.material.uniforms.opacity?.value).toBe(0.25)
+  expect(core?.material.uniforms.diameter?.value).toBe(6)
+  const geometry = core!.geometry
   expect(geometry.drawRange.count).toBe(1)
   expect(geometry.getAttribute('position').getX(0)).toBeCloseTo(-0.6)
   expect(geometry.getAttribute('position').getY(0)).toBeCloseTo(0.6)
   expect(geometry.getAttribute('danger').getX(0)).toBe(0)
 
+  const position = geometry.getAttribute('position')
+  const firstVersion = position.version
+  layer.render(gl, projection as never)
+  expect(position.version).toBe(firstVersion)
+  projection.defaultProjectionData.mainMatrix[0] = 1
+  layer.render(gl, projection as never)
+  expect(position.version).toBe(firstVersion + 1)
+
   model.pedVisualRisk[0] = 1
+  model.pedX = new Float32Array([40])
   snapshots.callback?.(0)
   expect(map.triggerRepaint).toHaveBeenCalled()
-  layer.render(gl, {} as never)
+  layer.render(gl, projection as never)
   expect(geometry.getAttribute('danger').getX(0)).toBe(1)
   layer.onRemove?.(map as never, gl)
 })

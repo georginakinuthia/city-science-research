@@ -35,7 +35,8 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
     lineString([inside, outside], { id: 'route-1' }),
   ])
   const files = new Map<string, FeatureCollection>([
-    ['/scenarioA/main_buildings.geojson', empty],
+    ['/scenarioA/main_buildings.geojson', featureCollection([point(outside)])],
+    ['/scenarioA/publicspace.geojson', featureCollection([boundary])],
     ['/scenarioA/extra_buildings.geojson', featureCollection([boundary])],
     ['/scenarioA/streets.geojson', walkways],
     ['/scenarioA/buses.geojson', empty],
@@ -79,6 +80,9 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
   expect(store.scenarioB?.structures.features).toEqual([boundary])
   expect(store.scenarioB?.surfaces.features).toEqual([])
   expect(store.scenarioB?.routing?.studyBoundary).toEqual(featureCollection([boundary]))
+  expect(store.scenarioA?.routing?.interventionZones).toBeUndefined()
+  expect(store.scenarioB?.routing?.interventionZones?.features).toHaveLength(1)
+  expect(fetch.mock.calls.some(([url]) => url.pathname.endsWith('/main_buildings.geojson'))).toBe(false)
   expect(store.scenarioB?.routing?.pedestrian?.metro.features).toHaveLength(1)
   expect(store.scenarioB?.routing?.transport.features[0]?.properties?.name).toBe('Local, "Express"')
   const sharedLights = store.scenarioA?.routing?.pedestrian?.streetLights
@@ -96,6 +100,10 @@ it('shares missing files with scenario A, replaces empty placeholders, and clips
     fetch.mock.calls.filter(([url]) => url.pathname === '/scenarioA/streets.geojson'),
   ).toHaveLength(1)
   expect(fetch.mock.calls.some(([url]) =>
-    /\/(?:shade|furniture|surfaces|walkway2|boundary|destinations|street_stalls|buildings)\.geojson$/.test(url.pathname),
+    /\/(?:walkway2|boundary|destinations|street_stalls|buildings)\.geojson$/.test(url.pathname),
   )).toBe(false)
+  for (const file of ['surfaces', 'shade', 'furniture']) {
+    expect(fetch.mock.calls.some(([url]) => url.pathname === `/scenarioB/${file}.geojson`)).toBe(true)
+  }
+  expect(fetch.mock.calls.some(([url]) => url.pathname === '/scenarioA/shade.geojson')).toBe(false)
 })

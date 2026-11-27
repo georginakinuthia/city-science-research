@@ -1,7 +1,7 @@
 import type { Feature, FeatureCollection, Geometry, Polygon, Position } from 'geojson'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { TACUBAYA_CROWD } from '../../config'
+import { TACUBAYA_CROWD, WEIDMANN } from '../../config'
 import {
   buildRoutingCosts,
   computeNodeDistanceField,
@@ -18,7 +18,7 @@ import {
   setBehaviorParams,
 } from '../agentBehavior'
 import { ScenarioContainer } from '../scenarioGen'
-import { Simulation } from '../Simulation'
+import { ENGAGEMENT_WAITING, Simulation } from '../Simulation'
 
 function collection(...features: Feature<Geometry>[]): FeatureCollection<Geometry> {
   return { type: 'FeatureCollection', features }
@@ -217,6 +217,56 @@ describe('demographic routing', () => {
     expect(sim.pedCellIdx[i]).not.toBe(wall)
   })
 
+  it('uses higher free-flow speed only on treated cells within the acceleration limit', () => {
+    const { sim, setBarrier } = buildSimulation()
+    const start = node('start', 4, 10)
+    const target = node('target', 20, 10)
+    setBarrier(0, [start, target])
+    const i = sim.spawnAgent()
+    initialiseAgent(sim, i, start, target, 0, 0)
+    sim.pedProfile[i] = DemographicProfile.standard
+    sim.pedSpeed[i] = sim.pedCurrentSpeed[i] = 1
+
+    advanceAgent(sim, i, sim.advanceResult)
+    expect(sim.pedCurrentSpeed[i]).toBeCloseTo(1)
+
+    sim.setAgentPosition(i, start.worldX!, start.worldY!)
+    const cell = sim.pedCellIdx[i]!
+    const interventionSpeed = new Float32Array(sim.cellCount).fill(1)
+    interventionSpeed[cell] = 1.24
+    sim.routingCosts!.interventionSpeed = interventionSpeed
+    advanceAgent(sim, i, sim.advanceResult)
+
+    expect(sim.pedCurrentSpeed[i]).toBeCloseTo(1.24)
+    expect(sim.pedCellIdx[i]).not.toBeLessThan(0)
+    expect(sim.advanceResult.distanceTraveled).toBeCloseTo(1.24 * createDefaultBehaviorParams().baseDeltaTime)
+  })
+
+  it('strengthens steering toward mapped waiting space for agents already dwelling', () => {
+    const displacement = (dwellPull: number) => {
+      const { sim, setBarrier } = buildSimulation()
+      const start = { ...node('start', 7, 10), noEngagement: false }
+      const target = node('target', 19, 10)
+      setBarrier(0, [start, target])
+      const i = sim.spawnAgent()
+      initialiseAgent(sim, i, start, target, 0, 0)
+      sim.pedProfile[i] = DemographicProfile.standard
+      sim.pedEngagementMode[i] = ENGAGEMENT_WAITING
+      sim.pedEngagementDuration[i] = 60
+      const cell = sim.pedCellIdx[i]!
+      sim.furniturePotential[cell] = 0.4
+      sim.furniturePotential[sim.cellAt(7, 9)] = 0.95
+      const pull = new Float32Array(sim.cellCount)
+      pull[cell] = dwellPull
+      sim.routingCosts!.interventionDwellPull = pull
+      advanceAgent(sim, i, sim.advanceResult)
+      expect(sim.pedEngagementMode[i]).toBe(ENGAGEMENT_WAITING)
+      return start.worldY! - sim.pedY[i]!
+    }
+
+    expect(displacement(0.4)).toBeGreaterThan(displacement(0))
+  })
+
   it('colors only for high local density or crime proximity', () => {
     const { sim, setBarrier } = buildSimulation()
     const start = node('start', 7, 4)
@@ -229,8 +279,17 @@ describe('demographic routing', () => {
     sim.routingCosts!.visualRisk = crimeProximity
 
     expect(getAgentVisualRisk(sim, i)).toBe(0)
-    sim.density[cell] = 60
+    const neighborhoodArea = (WEIDMANN.densityRadius * 2 + 1) ** 2 * sim.metersPerCell ** 2
+    sim.density[cell] = Math.ceil(1.6 * neighborhoodArea)
     expect(getAgentVisualRisk(sim, i)).toBe(1)
+
+    const crowdCapacity = new Float32Array(sim.cellCount).fill(1)
+    crowdCapacity[cell] = 1.35
+    sim.routingCosts!.crowdCapacity = crowdCapacity
+    expect(getAgentVisualRisk(sim, i)).toBe(0)
+    sim.density[cell] *= 2
+    expect(getAgentVisualRisk(sim, i)).toBe(1)
+
     crimeProximity[cell] = 2
     expect(getAgentVisualRisk(sim, i)).toBe(2)
     sim.density[cell] = 0

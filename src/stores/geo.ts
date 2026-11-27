@@ -7,6 +7,9 @@ import type {
 } from 'geojson'
 
 import { CRIME_PROXIMITY_METERS, CROSSING, GEOMETRY, WGS84 } from '../config'
+import {
+  INTERVENTION_CATEGORIES, INTERVENTION_RULES, MAX_ROUTE_BONUS, MIN_CRIME_WEIGHT, type InterventionZones,
+} from '../sim/scenarioBInterventions'
 
 /** Places display markers on features without changing the simulation geometry. */
 export function toMarkerPoints(collection: FeatureCollection<Geometry>): FeatureCollection<Point> {
@@ -99,6 +102,7 @@ export interface RoutingData {
   walkways: FeatureCollection<Geometry>
   studyBoundary?: FeatureCollection<Polygon | MultiPolygon>
   crowd?: CrowdAnchors
+  interventionZones?: InterventionZones
   pedestrian?: PedestrianLayers
 }
 
@@ -145,6 +149,12 @@ export interface RoutingCosts {
   staticObstaclePotentials?: Float32Array
   visualRisk?: Uint8Array
   crossingSpeed?: Float32Array
+  crowdCapacity?: Float32Array
+  interventionSpeed?: Float32Array
+  interventionRouteBonus?: Float32Array
+  interventionDwellPull?: Float32Array
+  interventionAxisX?: Float32Array
+  interventionAxisY?: Float32Array
 }
 
 // Constants for potential field decay rates (in meters)
@@ -370,6 +380,55 @@ function spatialLookup(data: FeatureCollection<Geometry>, grid: GridLike) {
   return cells
 }
 
+const INTERVENTION_CROSSING_MARGIN_METERS = 2.5
+
+function interventionCategoryBit(category: typeof INTERVENTION_CATEGORIES[number]): number {
+  return 1 << INTERVENTION_CATEGORIES.indexOf(category)
+}
+
+function interventionCoverage(zones: InterventionZones) {
+  const indexed = zones.features.map((zone) => ({
+    zone,
+    bit: interventionCategoryBit(zone.properties?.category ?? 'sightline_seating_veg'),
+    bounds: bbox(zone, { recompute: true }),
+  }))
+  return (feature: Feature<Geometry>) => {
+    if (!feature.geometry) return 0
+    const [west, south, east, north] = bbox(feature, { recompute: true })
+    let coverage = 0
+    for (const { zone, bit, bounds: [x0, y0, x1, y1] } of indexed) {
+      if (!(coverage & bit) && x0! <= east! && x1! >= west! && y0! <= north! && y1! >= south! &&
+          booleanIntersects(zone, feature)) coverage |= bit
+    }
+    return coverage
+  }
+}
+
+export function interventionOverlap(zones: InterventionZones) {
+  const coverage = interventionCoverage(zones)
+  return (feature: Feature<Geometry>) => coverage(feature) !== 0
+}
+
+export function applyCrimeInterventions(
+  crime: FeatureCollection<Geometry>,
+  zones: InterventionZones,
+): FeatureCollection<Geometry> {
+  if (!zones.features.length) return crime
+  const coverage = interventionCoverage(zones)
+  return {
+    ...crime,
+    features: crime.features.map((feature) => {
+      const mask = coverage(feature)
+      if (!mask) return feature
+      let weight = 1
+      for (const [index, category] of INTERVENTION_CATEGORIES.entries()) {
+        if (mask & (1 << index)) weight *= INTERVENTION_RULES[category].crimeRiskMultiplier
+      }
+      return { ...feature, properties: { ...feature.properties, crimeWeight: Math.max(MIN_CRIME_WEIGHT, weight) } }
+    }),
+  }
+}
+
 export function buildPedestrianGrid(
   data: RoutingData,
   structures: FeatureCollection<Geometry>,
@@ -405,8 +464,9 @@ export function buildPedestrianGrid(
   for (const { geometry } of [...layers.metro.features, ...layers.busStops.features]) {
     markCrossing(geometry, 8)
   }
-  for (const { geometry } of layers.zebraCrossings?.features ?? []) {
-    rasterizeRoute(geometry, grid, 0, (i) => { crossings[i] = 1 })
+  for (const { geometry, properties } of layers.zebraCrossings?.features ?? []) {
+    const margin = properties.improved ? INTERVENTION_CROSSING_MARGIN_METERS / scale : 0
+    rasterizeRoute(geometry, grid, margin, (i) => { crossings[i] = 1 })
   }
   for (let cell = 0; cell < walkable.length; cell++) {
     obstacles[cell] = obstacles[cell]! | busMask[cell]! | stallMask[cell]!
@@ -463,6 +523,7 @@ interface CrossingProperties {
   lit: number
   visibility: number
   risk_score: number
+  improved?: number
 }
 
 function lightRadius(properties: Feature['properties']): number {
@@ -495,13 +556,20 @@ export function enrichZebraCrossings(
       const geometry = feature?.geometry
       if (geometry?.type !== 'Polygon' && geometry?.type !== 'MultiPolygon') return []
       const polygon = { ...feature, geometry }
-      const nearby = (features: ReturnType<typeof index>, radius: number): number => {
+      const nearby = (
+        features: ReturnType<typeof index>, radius: number,
+        weight = (_feature: Feature<Geometry>) => 1,
+      ): number => {
         const zone = buffer(polygon, radius, { units: 'meters' })
         if (!zone) return 0
         const [west, south, east, north] = bbox(zone)
-        return features.filter(({ feature: candidate, bounds: [x0, y0, x1, y1] }) =>
-          x0! <= east! && x1! >= west! && y0! <= north! && y1! >= south! && booleanIntersects(zone, candidate),
-        ).length
+        let total = 0
+        for (const { feature: candidate, bounds: [x0, y0, x1, y1] } of features) {
+          if (x0! <= east! && x1! >= west! && y0! <= north! && y1! >= south! && booleanIntersects(zone, candidate)) {
+            total += weight(candidate)
+          }
+        }
+        return total
       }
       const p = feature.properties
       let id = measurement(p?.id ?? feature.id) ?? offset + 1
@@ -528,7 +596,8 @@ export function enrichZebraCrossings(
       }
       const traffic = nearby(streetIndex, CROSSING.trafficRadiusMeters) > 0
       const transitNearby = nearby(transitIndex, CROSSING.transitRadiusMeters) > 0
-      const incidents = nearby(crimeIndex, CRIME_PROXIMITY_METERS)
+      const incidents = nearby(crimeIndex, CRIME_PROXIMITY_METERS,
+        ({ properties }) => measurement(properties?.crimeWeight) ?? 1)
       return [{
         ...polygon,
         properties: {
@@ -565,8 +634,12 @@ export function buildRoutingCosts(
   const scale = grid.metersPerCell ?? 1
 
   if (visualRisk && data.pedestrian) {
-    for (const { geometry } of data.pedestrian.crime.features) {
-      if (geometry) rasterizeRoute(geometry, grid, CRIME_PROXIMITY_METERS / scale, (i) => { visualRisk[i] = 2 })
+    for (const { geometry, properties } of data.pedestrian.crime.features) {
+      if (!geometry) continue
+      const weight = Math.max(0, Math.min(1, measurement(properties?.crimeWeight) ?? 1))
+      if (weight === 0) continue
+      // Scaling the radius by sqrt(weight) scales the footprint of a point by its weight.
+      rasterizeRoute(geometry, grid, CRIME_PROXIMITY_METERS * Math.sqrt(weight) / scale, (i) => { visualRisk[i] = 2 })
     }
   }
 
@@ -620,8 +693,10 @@ export function buildRoutingCosts(
       const factor = Math.max(0.35, 1 - (p.has_signal ? 0 : 0.15) -
         Math.min(0.2, Math.max(0, p.width_m - 3, p.length_m - 8) * 0.025) -
         (p.obstructed ? 0.25 : 0))
-      rasterizeRoute(geometry, grid, CROSSING.approachMeters / scale, (i) => {
-        crossingSpeed[i] = Math.min(crossingSpeed[i]!, factor)
+      const speedFactor = p.improved ? Math.min(1, factor + 0.2) : factor
+      const approach = CROSSING.approachMeters + (p.improved ? INTERVENTION_CROSSING_MARGIN_METERS : 0)
+      rasterizeRoute(geometry, grid, approach / scale, (i) => {
+        crossingSpeed[i] = Math.min(crossingSpeed[i]!, speedFactor)
         if (crossingCells) {
           crossingCells[i] = 1
           if (lighting[i] !== 1) lighting[i] = -1
@@ -645,7 +720,39 @@ export function buildRoutingCosts(
     const congestion = Math.max(nearbyStalls, stallCongestion[i]!)
     child[i] = 1.35 - widthBenefit + 2 * congestion + (conflicts[i] ? 4 : 0)
   }
-  return { walkable, stepFree, female, child, visualRisk, crossingSpeed }
+  const routing: RoutingCosts = { walkable, stepFree, female, child, visualRisk, crossingSpeed }
+  if (!data.interventionZones?.features.length) return routing
+
+  const coverage = new Uint8Array(count)
+  const crowdCapacity = new Float32Array(count).fill(1)
+  const interventionSpeed = new Float32Array(count).fill(1)
+  const interventionRouteBonus = new Float32Array(count)
+  const interventionDwellPull = new Float32Array(count)
+  const interventionAxisX = new Float32Array(count)
+  const interventionAxisY = new Float32Array(count)
+  for (const zone of data.interventionZones.features) {
+    const category = zone.properties?.category ?? 'sightline_seating_veg'
+    const axis = zone.properties?.axis
+    const rule = INTERVENTION_RULES[category]
+    const bit = interventionCategoryBit(category)
+    rasterizePolygons([zone], grid, (i) => {
+      if (!walkable[i]) return
+      if (axis && interventionAxisX[i] === 0 && interventionAxisY[i] === 0) {
+        interventionAxisX[i] = axis[0]
+        interventionAxisY[i] = axis[1]
+      }
+      if (coverage[i]! & bit) return
+      coverage[i] = coverage[i]! | bit
+      crowdCapacity[i] = Math.max(crowdCapacity[i]!, rule.congestionThresholdScale)
+      interventionSpeed[i] = Math.max(interventionSpeed[i]!, rule.speedMultiplier)
+      interventionRouteBonus[i] = Math.min(MAX_ROUTE_BONUS, interventionRouteBonus[i]! + rule.routeUtilityBonus)
+      interventionDwellPull[i] = Math.max(interventionDwellPull[i]!, rule.offCorridorDwellPull)
+    })
+  }
+  return {
+    ...routing, crowdCapacity, interventionSpeed, interventionRouteBonus, interventionDwellPull,
+    interventionAxisX, interventionAxisY,
+  }
 }
 
 // Priority queue for Dijkstra's algorithm

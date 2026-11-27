@@ -139,6 +139,8 @@ export class Simulation {
   readonly stallPotential: Float32Array        // scenario-static
   readonly furniturePotential: Float32Array    // scenario-static
   readonly shadePotential: Float32Array        // scenario-static
+  private readonly occupiedDensityCells: Int32Array
+  private occupiedDensityCount = 0
   readonly density: Float32Array               // rebuilt each tick
   readonly cellHeadingDx: Float32Array         // rebuilt each tick (per-cell accumulator)
   readonly cellHeadingDy: Float32Array         // rebuilt each tick
@@ -303,6 +305,7 @@ export class Simulation {
     this.stallPotential     = new Float32Array(n)
     this.furniturePotential = new Float32Array(n)
     this.shadePotential     = new Float32Array(n)
+    this.occupiedDensityCells = new Int32Array(n)
     this.density            = new Float32Array(n)
     this.cellHeadingDx      = new Float32Array(n)
     this.cellHeadingDy      = new Float32Array(n)
@@ -931,6 +934,7 @@ export class Simulation {
     this.totalIntimateZoneSteps = 0
     this.totalPersonalZoneSteps = 0
     this.totalSocialZoneSteps = 0
+    this.occupiedDensityCount = 0
     this.density.fill(0)
     this.cellHeadingDx.fill(0)
     this.cellHeadingDy.fill(0)
@@ -949,9 +953,12 @@ export class Simulation {
     const density = this.density
     const hdx = this.cellHeadingDx
     const hdy = this.cellHeadingDy
-    density.fill(0)
-    hdx.fill(0)
-    hdy.fill(0)
+    const occupied = this.occupiedDensityCells
+    for (let k = 0; k < this.occupiedDensityCount; k++) {
+      const idx = occupied[k]!
+      density[idx] = hdx[idx] = hdy[idx] = 0
+    }
+    let occupiedCount = 0
     const alive = this.pedAlive
     const cellIdx = this.pedCellIdx
     const pHdx = this.pedHeadingDx
@@ -961,10 +968,12 @@ export class Simulation {
       if (alive[i] === 0) continue
       const idx = cellIdx[i]!
       if (idx < 0) continue
-      density[idx]++
-      hdx[idx] += pHdx[i]!
-      hdy[idx] += pHdy[i]!
+      if (density[idx] === 0) occupied[occupiedCount++] = idx
+      density[idx] = density[idx]! + 1
+      hdx[idx] = hdx[idx]! + pHdx[i]!
+      hdy[idx] = hdy[idx]! + pHdy[i]!
     }
+    this.occupiedDensityCount = occupiedCount
   }
 
   private rebuildSpatialHash(): void {
@@ -974,17 +983,18 @@ export class Simulation {
     const alive = this.pedAlive
     const x = this.pedX
     const y = this.pedY
-    const heading = this.pedHeading
+    const headingDx = this.pedHeadingDx
+    const headingDy = this.pedHeadingDy
     const speed = this.pedSpeed
     const currentSpeed = this.pedCurrentSpeed
+    const routed = Boolean(this.routingCosts)
     const pedId = this.pedId
     const n = this.pedCount
     for (let i = 0; i < n; i++) {
       if (alive[i] === 0) continue
-      const s = currentSpeed[i]! || speed[i]! || 0
-      const theta = (90 - heading[i]!) * DEG_TO_RAD
-      const vx = Math.cos(theta) * s
-      const vy = -Math.sin(theta) * s    // y grows south
+      const s = routed ? currentSpeed[i]! : currentSpeed[i]! || speed[i]! || 0
+      const vx = headingDx[i]! * s
+      const vy = headingDy[i]! * s
       hash.insert(pedId[i]!, x[i]!, y[i]!, vx, vy, radius, speed[i]!)
     }
   }

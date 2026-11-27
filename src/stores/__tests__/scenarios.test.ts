@@ -1,10 +1,12 @@
 import { featureCollection, lineString, multiLineString, point, polygon } from '@turf/turf'
+import { classifyInterventionFeature, interventionSpineAxis, type InterventionZones } from '../../sim/scenarioBInterventions'
 import type { FeatureCollection, Geometry } from 'geojson'
 import { describe, expect, it } from 'vitest'
 
 import { ScenarioContainer } from '../../sim/scenarioGen'
 
 import {
+  applyCrimeInterventions,
   buildNodesFromCollection,
   buildPedestrianGrid,
   buildRoutingCosts,
@@ -545,9 +547,10 @@ it('uses lamps for crossing visibility without coloring agents for poor lighting
     latToY: (lat: number) => 10 - lat * 111_195,
   }
   const crossingCell = 8 * grid.width + 10
-  const run = (streetLights: typeof lights, crime: FeatureCollection<Geometry> = empty) => {
+  const run = (streetLights: typeof lights, crime: FeatureCollection<Geometry> = empty, improved = false) => {
     const zebraCrossings = enrichZebraCrossings(featureCollection([crossing]), streetLights,
       empty, empty, crime, empty)
+    if (improved) zebraCrossings.features[0]!.properties.improved = 1
     const routing = buildRoutingCosts({
       transport: empty, walkways: empty,
       pedestrian: {
@@ -568,4 +571,71 @@ it('uses lamps for crossing visibility without coloring agents for poor lighting
   expect(run(active).props.lit).toBe(1)
   expect(run(active).routing.visualRisk?.[crossingCell]).toBe(0)
   expect(run(active, featureCollection([point([0.00004, 0.00002])])).routing.visualRisk?.[crossingCell]).toBe(2)
+  const improved = run(active, empty, true).routing
+  expect(improved.crossingSpeed?.[crossingCell]).toBeGreaterThan(run(active).routing.crossingSpeed![crossingCell]!)
+  expect(improved.crossingSpeed?.[0]).toBe(1)
+  expect(improved.visualRisk?.[crossingCell]).toBe(0)
+})
+
+it('models less crime exposure and more walkable capacity only near interventions', () => {
+  const grid = { ...createMockGrid(85, 45), metersPerCell: 1 }
+  const cell = (x: number, y: number) => y * grid.width + x
+  const empty = featureCollection([])
+  const crime = featureCollection([
+    point([15, 20], { id: 'treated' }),
+    point([65, 20], { id: 'outside' }),
+  ])
+  const seating = polygon([[[14, 18], [17, 18], [17, 22], [14, 22], [14, 18]]],
+    { category: 'sightline_seating_veg' } as const)
+  const interventionZones: InterventionZones = featureCollection([
+    polygon([[[10, 15], [21, 15], [21, 25], [10, 25], [10, 15]]],
+      { category: 'shared_access_spine', axis: [1, 0] } as InterventionZones['features'][number]['properties']),
+    seating,
+    seating,
+  ])
+  const adjustedCrime = applyCrimeInterventions(crime, interventionZones)
+  expect(crime.features[0]?.properties).toEqual({ id: 'treated' })
+  expect(adjustedCrime.features[0]?.properties).toEqual({ id: 'treated', crimeWeight: 0.18 })
+  expect(adjustedCrime.features[1]).toEqual(crime.features[1])
+
+  const walkable = new Uint8Array(grid.width * grid.height).fill(1)
+  walkable[cell(15, 21)] = 0
+  const baseline = {
+    transport: empty, walkways: empty,
+    pedestrian: {
+      streets: empty, blocks: empty, buses: empty, metro: empty, busStops: empty,
+      crime, economicActivity: empty,
+    },
+  }
+  const a = buildRoutingCosts(baseline, grid, walkable, undefined)
+  const b = buildRoutingCosts({
+    ...baseline, interventionZones, pedestrian: { ...baseline.pedestrian, crime: adjustedCrime },
+  }, grid, walkable, undefined)
+
+  expect(a.visualRisk?.[cell(26, 20)]).toBe(2)
+  expect(b.visualRisk?.[cell(26, 20)]).toBe(0)
+  expect(b.visualRisk?.[cell(17, 20)]).toBe(2)
+  expect(b.visualRisk?.[cell(76, 20)]).toBe(a.visualRisk?.[cell(76, 20)])
+  expect(b.crowdCapacity?.[cell(15, 20)]).toBeCloseTo(2.35)
+  expect(b.interventionSpeed?.[cell(15, 20)]).toBeCloseTo(1.24)
+  expect(b.interventionRouteBonus?.[cell(15, 20)]).toBeCloseTo(0.67)
+  expect(b.interventionDwellPull?.[cell(15, 20)]).toBeCloseTo(0.4)
+  expect(b.interventionAxisX?.[cell(15, 20)]).toBe(1)
+  expect(b.interventionAxisY?.[cell(15, 20)]).toBe(0)
+  expect(b.interventionRouteBonus?.[cell(20, 20)]).toBeCloseTo(0.45)
+  expect(b.interventionDwellPull?.[cell(20, 20)]).toBe(0)
+  expect(b.interventionSpeed?.[cell(65, 20)]).toBe(1)
+  expect(b.crowdCapacity?.[cell(15, 21)]).toBe(1)
+  expect(b.crowdCapacity?.[cell(65, 20)]).toBe(1)
+})
+
+it('identifies inherited intervention types and derives mapped spine orientations', () => {
+  expect(classifyInterventionFeature({ category: 'active_recreation' }, 'surfaces')).toBe('active_recreation')
+  expect(classifyInterventionFeature({ name: 'Puestos del mercado' }, 'surfaces')).toBe('market_organized')
+  expect(classifyInterventionFeature({}, 'bus bays')).toBe('transit_wayfinding')
+  expect(classifyInterventionFeature({}, 'street lights')).toBe('street_lighting')
+  const eastWest = interventionSpineAxis(lineString([[-99.19, 19.402], [-99.188, 19.402]]).geometry)
+  const northSouth = interventionSpineAxis(lineString([[-99.19, 19.401], [-99.19, 19.403]]).geometry)
+  expect(eastWest?.[0]).toBeCloseTo(1)
+  expect(Math.abs(northSouth?.[1] ?? 0)).toBeCloseTo(1)
 })

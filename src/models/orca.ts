@@ -57,6 +57,7 @@ export class SpatialHashGrid {
   private cellSize: number
   private invCellSize: number
   private buckets: Map<number, OrcaAgent[]>
+  private bucketPool: OrcaAgent[][] = []
   private pool: OrcaAgent[] = []
   private poolUsed: number = 0
 
@@ -76,6 +77,10 @@ export class SpatialHashGrid {
   }
 
   clear(): void {
+    for (const bucket of this.buckets.values()) {
+      bucket.length = 0
+      this.bucketPool.push(bucket)
+    }
     this.buckets.clear()
     // Reset pool index but keep the records allocated for reuse
     this.poolUsed = 0
@@ -123,7 +128,7 @@ export class SpatialHashGrid {
     const key = this.hash(cx, cy)
     let bucket = this.buckets.get(key)
     if (!bucket) {
-      bucket = []
+      bucket = this.bucketPool.pop() ?? []
       this.buckets.set(key, bucket)
     }
     bucket.push(agent)

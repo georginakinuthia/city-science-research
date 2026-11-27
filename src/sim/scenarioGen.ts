@@ -148,7 +148,15 @@ export class ScenarioContainer implements ScenarioData {
       this.surfacesPotentials = potentialsFromMasks(walkable, walkable, grid, DECAY_FACTORS.SURFACE)
       this.staticObstaclePotentials = potentialsFromMasks(pedestrian.obstacles, walkable, grid, DECAY_FACTORS.FURNITURE)
       this.stallsPotentials = potentialsFromMasks(pedestrian.stalls, walkable, grid, DECAY_FACTORS.STALLS)
-      this.furniturePotentials = new Float32Array(walkable.length)
+      if (this.routing?.interventionZones?.features.length && this.furniture.features.length) {
+        const reachableFurniture = featureMask(this.furniture, grid)
+        for (let i = 0; i < reachableFurniture.length; i++) {
+          if (!walkable[i]) reachableFurniture[i] = 0
+        }
+        this.furniturePotentials = potentialsFromMasks(reachableFurniture, walkable, grid, DECAY_FACTORS.FURNITURE)
+      } else {
+        this.furniturePotentials = new Float32Array(walkable.length)
+      }
       this.shadePotentials = potentialsFromMasks(featureMask(this.shade, grid), walkable, grid, DECAY_FACTORS.SHADE)
       return
     }

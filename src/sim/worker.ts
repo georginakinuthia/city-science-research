@@ -487,8 +487,6 @@ function buildSnapshot(state: SimState): SimSnapshot {
   const pedY = sim.pedY
   const pedHeading = sim.pedHeading
   const pedEngagementMode = sim.pedEngagementMode
-  // Crime is shared across maps, while congestion is measured per simulation.
-  const crimeProximity = sims[0]?.sim.routingCosts?.visualRisk
   const pedStartNodeIdx = sim.pedStartNodeIdx
   const pedIntimateViolations = sim.pedIntimateViolations
   const pedPersonalViolations = sim.pedPersonalViolations
@@ -502,7 +500,7 @@ function buildSnapshot(state: SimState): SimSnapshot {
     bufs.pedY[w] = pedY[i]!
     bufs.pedHeading[w] = pedHeading[i]!
     bufs.pedEngagementMode[w] = pedEngagementMode[i]!
-    bufs.pedVisualRisk[w] = getAgentVisualRisk(sim, i, crimeProximity)
+    bufs.pedVisualRisk[w] = getAgentVisualRisk(sim, i)
     bufs.pedStartNodeIdx[w] = pedStartNodeIdx[i]!
     bufs.pedIntimateViolations[w] = pedIntimateViolations[i]!
     bufs.pedPersonalViolations[w] = pedPersonalViolations[i]!

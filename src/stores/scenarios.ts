@@ -12,14 +12,17 @@ import { defineStore } from 'pinia'
 import { computed, markRaw, ref } from 'vue'
 
 import { TACUBAYA_CROWD } from '../config'
+import { classifyInterventionFeature, interventionSpineAxis, type InterventionZones } from '../sim/scenarioBInterventions'
 import { ScenarioContainer } from '../sim/scenarioGen'
 import type { CrowdAnchors, NodeState, ScenarioData } from './geo'
 import {
+  applyCrimeInterventions,
   buildNodesFromCollection,
   computeNodeDistanceField,
   computeShortestPath,
   enrichZebraCrossings,
   featureMask,
+  interventionOverlap,
   polygonizeBlocks,
   type GridLike,
   toMarkerPoints,
@@ -274,6 +277,28 @@ function bufferPointsByDia(fc: FeatureCollection<Geometry> | null): FeatureColle
   return { type: 'FeatureCollection', features }
 }
 
+function createInterventionZones(
+  explicit: FeatureCollection<Geometry> | undefined,
+  fallback: [string, FeatureCollection<Geometry> | undefined][],
+  area: ReturnType<typeof studyArea>,
+): InterventionZones {
+  const [west, south, east, north] = area.bounds
+  const inputs: typeof fallback = explicit ? [['', explicit]] : fallback
+  const features = inputs.flatMap(([hint, input]) => (input?.features ?? []).flatMap((feature) => {
+    if (!feature?.geometry) return []
+    const [x0, y0, x1, y1] = bbox(feature, { recompute: true })
+    if (!(x0! <= east! && x1! >= west! && y0! <= north! && y1! >= south!)) return []
+    const category = classifyInterventionFeature(feature.properties, hint)
+    const { type } = feature.geometry
+    const radius = type === 'Point' || type === 'MultiPoint' ? (category === 'street_lighting' ? 24 : 16)
+      : type === 'LineString' || type === 'MultiLineString' ? 12 : 6
+    const zone = buffer(feature, radius, { units: 'meters' })
+    const axis = category === 'shared_access_spine' ? interventionSpineAxis(feature.geometry) : undefined
+    return zone ? [{ ...zone, properties: { category, axis } }] : []
+  }))
+  return { type: 'FeatureCollection', features }
+}
+
 export async function loadScenario(
   scenarioPath: string,
   load = fetchGeoJSON,
@@ -283,11 +308,13 @@ export async function loadScenario(
   const optionalLayer = (filename: string) => fetchOptionalMapLayer(
     scenarioPath === 'scenarioB' ? [[scenarioPath, filename], ['scenarioA', filename]] : [[scenarioPath, filename]], load,
   )
+  const isInterventionScenario = scenarioPath === 'scenarioB'
+  const localLayer = (filename: string) => fetchOptionalMapLayer([[scenarioPath, filename]], load)
   const [
-    mainBuildings, extraBuildings, streets, buses, stalls, trees, blocks,
-    crime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary, streetLights, rawCrossings, scenarioStalls,
+    extraBuildings, streets, buses, stalls, trees, blocks,
+    reportedCrime, economicActivity, transportGeometry, transportRows, metro, busStops, boundary, streetLights,
+    rawCrossings, scenarioStalls, explicitInterventions, publicSpace, plazaConnections, seating, canopy, landscaping, upgradedLights, upgradedCrossings,
   ] = await Promise.all([
-    layer('main_buildings.geojson'),
     layer('extra_buildings.geojson'),
     layer('streets.geojson'),
     layer('buses.geojson'),
@@ -296,20 +323,33 @@ export async function loadScenario(
     layer('blocks.geojson'),
     layer('crime.geojson'),
     layer('economic_activity2.geojson'),
-    layer('transport_types.geojson'),
+    optionalLayer('transport_types.geojson'),
     fetchScenarioLayer(scenarioPath, 'transport_types.csv', loadTransport, (rows) => rows.length === 0),
     layer('metro_stations.geojson'),
     layer('bus_stops.geojson'),
     layer('study_boundary.geojson'),
     optionalLayer('street_lights.geojson'),
     optionalLayer('zebra_crossings.geojson'),
-    scenarioPath === 'scenarioB' ? fetchOptionalMapLayer([[scenarioPath, 'stalls.geojson']], load) : undefined,
+    isInterventionScenario ? localLayer('stalls.geojson') : undefined,
+    isInterventionScenario ? localLayer('interventions.geojson') : undefined,
+    isInterventionScenario ? localLayer('surfaces.geojson') : undefined,
+    isInterventionScenario ? optionalLayer('publicspace.geojson') : undefined,
+    isInterventionScenario ? localLayer('furniture.geojson') : undefined,
+    isInterventionScenario ? localLayer('shade.geojson') : undefined,
+    isInterventionScenario ? localLayer('trees.geojson') : undefined,
+    isInterventionScenario ? localLayer('street_lights.geojson') : undefined,
+    isInterventionScenario ? localLayer('zebra_crossings.geojson') : undefined,
   ])
 
   const transportById = new Map(transportRows.map((row) => [row.id, row]))
+  // Transit still influences routing when the optional transport geometry is unavailable.
+  const transportSource = transportGeometry ?? {
+    type: 'FeatureCollection',
+    features: [...buses.features, ...metro.features, ...busStops.features],
+  } satisfies FeatureCollection<Geometry>
   const transport: FeatureCollection<Geometry> = {
-    ...transportGeometry,
-    features: transportGeometry.features.map((feature) => ({
+    ...transportSource,
+    features: transportSource.features.map((feature) => ({
       ...feature,
       properties: {
         ...transportById.get(String(feature.properties?.id ?? feature.id)),
@@ -317,10 +357,17 @@ export async function loadScenario(
       },
     })),
   }
-  const structures: FeatureCollection<Geometry> = {
-    type: 'FeatureCollection',
-    features: [...mainBuildings.features, ...extraBuildings.features],
-  }
+  const structures = extraBuildings
+  const area = studyArea(boundary, streets)
+  const interventionZones = isInterventionScenario
+    ? createInterventionZones(explicitInterventions,
+      [
+        ['surfaces', publicSpace], ['crossings', plazaConnections], ['seating', seating],
+        ['stalls', scenarioStalls], ['canopy', canopy], ['landscaping', landscaping], ['bus bays', buses],
+        ['street lights', upgradedLights], ['crossings', upgradedCrossings],
+      ], area)
+    : undefined
+  const crime = interventionZones ? applyCrimeInterventions(reportedCrime, interventionZones) : reportedCrime
   const lights = streetLights ?? emptyCollection()
   const zebraCrossings = enrichZebraCrossings(
     rawCrossings ?? emptyCollection(), lights,
@@ -330,7 +377,12 @@ export async function loadScenario(
     streets, crime,
     { type: 'FeatureCollection', features: [...metro.features, ...busStops.features] },
   )
-  const area = studyArea(boundary, streets)
+  if (interventionZones?.features.length) {
+    const overlaps = interventionOverlap(interventionZones)
+    for (const crossing of zebraCrossings.features) {
+      if (overlaps(crossing)) crossing.properties.improved = 1
+    }
+  }
   const walkwayPoints = uniquePoints(walkwayAnchors(streets, area), 0.000008)
   const busPoints = uniquePoints(pointsInArea(busStops, area), 0.000015)
   const crowd: CrowdAnchors = {
@@ -340,8 +392,8 @@ export async function loadScenario(
   }
 
   return {
-    furniture: emptyCollection(),
-    stalls,
+    furniture: seating ?? emptyCollection(),
+    stalls: scenarioStalls ?? stalls,
     structures,
     surfaces: emptyCollection(),
     shade: trees,
@@ -349,6 +401,7 @@ export async function loadScenario(
       transport,
       walkways: emptyCollection(),
       studyBoundary: area.studyBoundary,
+      interventionZones,
       crowd,
       pedestrian: {
         streets,

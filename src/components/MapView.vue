@@ -3,7 +3,9 @@ import maplibregl from 'maplibre-gl'
 import { defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
 
 import { createTacubayaAgentsLayer } from '../rendering/TacubayaAgentsLayer'
-import { addTacubayaMapAssets, createTacubayaBasemap, loadTacubayaMapAssets } from '../sim/createMapRenderer'
+import {
+  addTacubayaInterventions, addTacubayaMapAssets, createTacubayaBasemap, loadTacubayaMapAssets, updateTacubayaCrime,
+} from '../sim/createMapRenderer'
 import { useMapStore } from '../stores/map'
 import { useModelsStore } from '../stores/models'
 import { useScenariosStore } from '../stores/scenarios'
@@ -29,7 +31,8 @@ onMounted(async () => {
       console.error('Tacubaya map layers could not load:', error)
       return []
     })
-    for (const panel of panels) {
+    const scenariosReady = scenariosStore.hasScenarios ? Promise.resolve() : scenariosStore.loadScenarios()
+    for (const [index, panel] of panels.entries()) {
       const map = new maplibregl.Map({
         ...mapStore.baseConfig,
         container: panel.container,
@@ -44,11 +47,16 @@ onMounted(async () => {
         if (disposed || generation !== styleGeneration) return
         addTacubayaMapAssets(map, loaded)
         mapStore.applyLayerVisibility(map)
+        await scenariosReady
+        if (disposed || generation !== styleGeneration) return
+        const scenario = index === 0 ? scenariosStore.scenarioA : scenariosStore.scenarioB
+        updateTacubayaCrime(map, scenario?.routing?.pedestrian?.crime)
+        if (index === 1) addTacubayaInterventions(map, scenario?.routing?.interventionZones)
       })
     }
     mapStore.setMapReferences(panels[0].map, panels[1].map)
 
-    if (!scenariosStore.hasScenarios) await scenariosStore.loadScenarios()
+    await scenariosReady
     if (disposed) return
     const { scenarioA, scenarioB, sharedNodes, error } = scenariosStore
     if (!scenarioA || !scenarioB) throw new Error(error || 'Scenario data is unavailable.')
@@ -59,16 +67,21 @@ onMounted(async () => {
     for (const [index, panel] of panels.entries()) {
       const model = models[index]
       const { map } = panel
+      let lastPositions
       panel.renderer = {
         attach() {
           if (!map.getLayer('agents')) map.addLayer(createTacubayaAgentsLayer(model))
         },
-        draw() { map.triggerRepaint() },
+        draw() {
+          if (lastPositions === model.pedX) return
+          lastPositions = model.pedX
+          map.triggerRepaint()
+        },
       }
       if (map.getLayer('background')) panel.renderer.attach()
     }
     modelsStore.getClient()?.onSnapshot((index) => {
-      if (!simStore.isRunning) panels[index]?.renderer?.draw()
+      panels[index]?.renderer?.draw()
     })
     simStore.registerMasterControllers({
       viewA: panels[0].renderer,
